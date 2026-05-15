@@ -621,6 +621,7 @@ function FeedbackPanel({arch,onRefine}){
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState(null);
   const [changelog,setChangelog]=useState([]);
+  const [changelogTime,setChangelogTime]=useState(null);
   const [chatHistory,setChatHistory]=useState([]);
   const [previousArch,setPreviousArch]=useState(null);
   const [attachedFiles,setAttachedFiles]=useState([]);
@@ -666,6 +667,7 @@ function FeedbackPanel({arch,onRefine}){
         setChatHistory(prev=>[...prev,{role:"system",message:"Architecture updated. See Change Log below."}]);
         setPreviousArch(arch);
         setChangelog(computeChangelog(arch,data.architecture));
+        setChangelogTime(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
         onRefine(data.architecture);
       }
     }catch(e){setErr(e.message||"Reasoning failed.");}
@@ -725,9 +727,11 @@ function FeedbackPanel({arch,onRefine}){
           <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10,fontSize:12,fontWeight:600,color:"var(--color-text-primary)",fontFamily:"var(--font-sans)"}}>
             <i className="ti ti-git-compare" style={{fontSize:14,color:"var(--color-text-secondary)"}}/>
             Change Log
-            <span style={{marginLeft:"auto",fontSize:10,fontWeight:400,color:"var(--color-text-tertiary)"}}>{changelog.length} change{changelog.length!==1?"s":""}</span>
+            <span style={{marginLeft:"auto",fontSize:10,fontWeight:400,color:"var(--color-text-tertiary)"}}>
+              {changelog.length} change{changelog.length!==1?"s":""}
+            </span>
             {previousArch&&(
-              <button onClick={()=>{onRefine(previousArch);setChangelog([]);setPreviousArch(null);}} title="Undo this refinement" style={{marginLeft:10,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"3px 8px",fontSize:10,color:"var(--color-text-primary)",cursor:"pointer",display:"flex",alignItems:"center",gap:4,fontFamily:"var(--font-sans)",transition:"all 0.15s"}}>
+              <button onClick={()=>{onRefine(previousArch);setChangelog([]);setChangelogTime(null);setPreviousArch(null);}} title="Undo this refinement" style={{marginLeft:10,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"3px 8px",fontSize:10,color:"var(--color-text-primary)",cursor:"pointer",display:"flex",alignItems:"center",gap:4,fontFamily:"var(--font-sans)",transition:"all 0.15s"}}>
                 <i className="ti ti-arrow-back-up" style={{fontSize:12}}/> Rollback
               </button>
             )}
@@ -735,7 +739,8 @@ function FeedbackPanel({arch,onRefine}){
           {changelog.map((c,i)=>(
             <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"4px 0",borderTop:i>0?"0.5px solid var(--color-border-tertiary)":"none"}}>
               <i className={"ti "+ICO[c.type]} style={{fontSize:11,color:CLR[c.type],marginTop:2,flexShrink:0}}/>
-              <span style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.45,fontFamily:"var(--font-sans)"}}>{c.label}</span>
+              <span style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.45,fontFamily:"var(--font-sans)",flex:1}}>{c.label}</span>
+              {changelogTime && <span style={{fontSize:10,color:"var(--color-text-tertiary)",flexShrink:0,marginTop:2}}>{changelogTime}</span>}
             </div>
           ))}
         </div>
