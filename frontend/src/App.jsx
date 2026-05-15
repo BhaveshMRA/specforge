@@ -322,27 +322,37 @@ function AnimateView({arch}){
   const [phase,setPhase]=useState("idle");
   const [typed,setTyped]=useState("");
   const [activeStep,setActiveStep]=useState(-1);
+  const [autoNextTimer,setAutoNextTimer]=useState(10);
 
   useEffect(()=>{
-    if(phase!=="typing")return;
-    let i=0; setTyped("");
-    const iv=setInterval(()=>{
-      i++;
-      setTyped(sampleMsg.slice(0,i));
-      if(i>=sampleMsg.length){
-        clearInterval(iv);
-        setTimeout(()=>{setPhase("stepping");setActiveStep(0);},500);
-      }
-    },38);
-    return()=>clearInterval(iv);
-  },[phase]);
+    if(phase==="typing"){
+      let i=0; setTyped("");
+      const iv=setInterval(()=>{
+        i++;
+        setTyped(sampleMsg.slice(0,i));
+        if(i>=sampleMsg.length){
+          clearInterval(iv);
+          setTimeout(()=>{setPhase("stepping");setActiveStep(0);setAutoNextTimer(10);},500);
+        }
+      },38);
+      return()=>clearInterval(iv);
+    } else if(phase==="stepping"){
+      const iv=setInterval(()=>setAutoNextTimer(p=>p-1), 1000);
+      return()=>clearInterval(iv);
+    }
+  },[phase, activeStep, sampleMsg]);
+
+  useEffect(()=>{
+    if(phase==="stepping" && autoNextTimer<=0) next();
+  },[autoNextTimer, phase]);
 
   function start(){setPhase("typing");setTyped("");setActiveStep(-1);}
   function next(){
+    setAutoNextTimer(10);
     if(activeStep<total-1) setActiveStep(s=>s+1);
     else setPhase("done");
   }
-  function reset(){setPhase("idle");setTyped("");setActiveStep(-1);}
+  function reset(){setPhase("idle");setTyped("");setActiveStep(-1);setAutoNextTimer(10);}
 
   const progressPct=
     phase==="idle"?0:
@@ -504,7 +514,7 @@ function AnimateView({arch}){
               <i className="ti ti-refresh" aria-hidden="true"/> Reset
             </button>
             <button onClick={next} className="run-btn" style={{display:"flex",alignItems:"center",gap:6,padding:"8px 22px"}}>
-              {activeStep<total-1?"Next":"Finish"} <i className="ti ti-arrow-right" aria-hidden="true"/>
+              {activeStep<total-1?`Next (${autoNextTimer})`:`Finish (${autoNextTimer})`} <i className="ti ti-arrow-right" aria-hidden="true"/>
             </button>
           </>
         )}
