@@ -95,3 +95,19 @@ body{font-family:var(--font-sans);background:var(--color-background-secondary);c
 .cursor-blink{animation:blink 0.8s ease infinite}
 @keyframes pulse{0%,100%{opacity:.4;transform:scale(1)}50%{opacity:1;transform:scale(1.35)}}
 .cursor-blink{animation:blink 0.8s ease infinite}
+
+/* ── Step Scene Animations ─────────────────────────────────────────────────── */
+@keyframes particleFlow {
+  0%   { left: -12%; opacity: 0; transform: translateY(-50%) scale(0.5); }
+  12%  { opacity: 1;  transform: translateY(-50%) scale(1); }
+  88%  { opacity: 1;  transform: translateY(-50%) scale(1); }
+  100% { left: 112%; opacity: 0; transform: translateY(-50%) scale(0.5); }
+}
+@keyframes nodePulse {
+  0%,100% { box-shadow: 0 0 0 0 transparent; }
+  50%      { box-shadow: 0 0 0 5px var(--pulse-color, #378ADD33); }
+}
+@keyframes trackShimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
