@@ -15,7 +15,7 @@ Type a plain-English product idea or upload context documents (PDFs, Word docs, 
 - **Diagram view** — interactive SVG flow diagram with numbered data-flow connections across 4–6 architecture layers
 - **Cards view** — layer-by-layer breakdown of every component with tech stack badges
 - **Animate view** — step-by-step walkthrough of the system's message journey, with visual micro-animations per step
-- **Iterative Refinement** — An interactive feedback panel lets you chat with the model to tweak the architecture (e.g., "swap MySQL for PostgreSQL"). The UI renders a precise Git-style **Changelog** showing what components or layers were added, modified, or removed.
+- **Reason Architecture 🧠** — An embedded conversational AI assistant lets you chat about your architecture contextually. Ask it questions (e.g. "Where is the database?") and it will answer conversationally, or issue structural commands (e.g. "Swap MySQL for PostgreSQL") and it will rebuild the JSON. The UI renders a precise Git-style **Changelog** showing what components or layers were added, modified, or removed.
 - **Persistence & Checkpoints** — Save architectures locally to a SQLite database. Use **Session Checkpoints** to snapshot your progress and instantly jump back to earlier states if a refinement goes wrong, and use **Overwrite** to update existing saves effortlessly.
 - **Theming** — Manual Light/Dark mode toggling built directly into the sidebar.
 

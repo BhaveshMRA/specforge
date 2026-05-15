@@ -77,6 +77,22 @@ Your job:
 
 Return ONLY valid JSON in the same schema as the input. No explanation, no markdown."""
 
+REASON_PROMPT = """You are a senior software architect conducting a design review. 
+You will receive an existing architecture JSON, a chat history, and a prompt from the engineer.
+
+Determine if the engineer is asking a QUESTION (e.g. "where is the database?", "what parameters are there?") or explicitly commanding a STRUCTURAL MODIFICATION (e.g. "add a cache layer", "swap MySQL for PostgreSQL", "add those to the input component").
+
+CRITICAL RULE: Default to "chat" type UNLESS the engineer uses explicit imperative action words instructing you to modify the architecture (e.g., "add", "change", "remove", "update"). If the engineer is just making a statement, providing context, listing items, or asking a question, you MUST use "chat" type.
+
+Return ONLY valid JSON in this exact schema:
+{
+  "type": "chat" | "architecture",
+  "message": "Conversational, helpful response if type is 'chat', otherwise an empty string",
+  "architecture": { /* the fully updated architecture JSON if type is 'architecture', otherwise null */ }
+}
+
+If the type is 'architecture', you must preserve the existing architecture structure as much as possible, applying ONLY the requested changes, and updating key_flows/sample_query appropriately. Do not output markdown, just the raw JSON object."""
+
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
@@ -87,6 +103,7 @@ class SpecRequest(BaseModel):
 class RefineRequest(BaseModel):
     existing_arch: dict
     feedback: str
+    chat_history: list = []
 
 
 class SaveRequest(BaseModel):
@@ -149,6 +166,22 @@ async def refine(req: RefineRequest):
         {"role": "user", "content": (
             f"Existing architecture:\n{json.dumps(req.existing_arch, indent=2)}\n\n"
             f"Requested changes: {req.feedback}"
+        )},
+    ])
+
+
+@app.post("/api/reason")
+async def reason(req: RefineRequest):
+    history_str = ""
+    if req.chat_history:
+        history_str = "Chat History:\n" + "\n".join([f"{msg['role']}: {msg['message']}" for msg in req.chat_history]) + "\n\n"
+        
+    return await call_ollama([
+        {"role": "system", "content": REASON_PROMPT},
+        {"role": "user", "content": (
+            f"Existing architecture:\n{json.dumps(req.existing_arch, indent=2)}\n\n"
+            f"{history_str}"
+            f"Engineer's prompt: {req.feedback}"
         )},
     ])
 

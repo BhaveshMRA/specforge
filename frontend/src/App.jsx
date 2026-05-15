@@ -621,6 +621,7 @@ function FeedbackPanel({arch,onRefine}){
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState(null);
   const [changelog,setChangelog]=useState([]);
+  const [chatHistory,setChatHistory]=useState([]);
   const [previousArch,setPreviousArch]=useState(null);
   const [attachedFiles,setAttachedFiles]=useState([]);
   const [uploading,setUploading]=useState(false);
@@ -637,7 +638,8 @@ function FeedbackPanel({arch,onRefine}){
     if((!feedback.trim()&&!attachedFiles.length)||loading)return;
     setLoading(true);setErr(null);
     try{
-      let ctx=feedback.trim();
+      const promptText = feedback.trim();
+      let ctx = promptText;
       if(attachedFiles.length){
         setUploading(true);
         for(const af of attachedFiles){
@@ -647,17 +649,26 @@ function FeedbackPanel({arch,onRefine}){
           if(!ur.ok)throw new Error(ud.detail||"File upload failed");
           ctx+=`\n\n[DOCUMENT: ${af.name}]\n${ud.extracted_text}`;
         }
-        if(!feedback.trim()) ctx="Refine based on attached documents."+ctx;
+        if(!promptText) ctx="Reason based on attached documents."+ctx;
         setUploading(false);
       }
-      const res=await fetch("/api/refine",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({existing_arch:arch,feedback:ctx})});
+      
+      setChatHistory(prev=>[...prev,{role:"user",message:promptText || "Attached documents."}]);
+      setFeedback("");setAttachedFiles([]);
+      
+      const res=await fetch("/api/reason",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({existing_arch:arch,feedback:ctx,chat_history:chatHistory})});
       const data=await res.json();
-      if(!res.ok)throw new Error(data.detail||"Refinement failed");
-      setPreviousArch(arch);
-      setChangelog(computeChangelog(arch,data));
-      onRefine(data);
-      setFeedback("");setAttachedFiles([]);setOpen(false);
-    }catch(e){setErr(e.message||"Refinement failed.");}
+      if(!res.ok)throw new Error(data.detail||"Reasoning failed");
+      
+      if(data.type==="chat"){
+        setChatHistory(prev=>[...prev,{role:"assistant",message:data.message}]);
+      }else if(data.type==="architecture" && data.architecture){
+        setChatHistory(prev=>[...prev,{role:"system",message:"Architecture updated. See Change Log below."}]);
+        setPreviousArch(arch);
+        setChangelog(computeChangelog(arch,data.architecture));
+        onRefine(data.architecture);
+      }
+    }catch(e){setErr(e.message||"Reasoning failed.");}
     finally{setLoading(false);setUploading(false);}
   }
 
@@ -667,14 +678,24 @@ function FeedbackPanel({arch,onRefine}){
   return(
     <div style={{marginTop:16,borderTop:"0.5px solid var(--color-border-tertiary)",paddingTop:12}}>
       <button onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",fontSize:12,fontWeight:600,color:open?"var(--color-text-primary)":"var(--color-text-tertiary)",padding:"4px 0",transition:"color 0.2s",fontFamily:"var(--font-sans)"}}>
-        <i className={"ti "+(open?"ti-chevron-up":"ti-pencil")} style={{fontSize:13}}/>
-        {open?"Close":"Refine Architecture ✏️"}
+        <i className={"ti "+(open?"ti-chevron-up":"ti-brain")} style={{fontSize:14}}/>
+        {open?"Close":"Reason Architecture 🧠"}
       </button>
 
       {open&&(
         <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}} className="fade-up">
+          {chatHistory.length>0&&(
+            <div style={{display:"flex",flexDirection:"column",gap:8,padding:"10px",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--radius-md)",maxHeight:250,overflowY:"auto"}}>
+              {chatHistory.map((msg,i)=>(
+                <div key={i} style={{fontSize:12,fontFamily:"var(--font-sans)",display:"flex",gap:6,alignItems:"flex-start",color:msg.role==="user"?"var(--color-text-primary)":msg.role==="system"?"#1D9E75":"var(--color-text-secondary)"}}>
+                  <i className={"ti "+(msg.role==="user"?"ti-user":msg.role==="system"?"ti-check":"ti-robot")} style={{marginTop:2,fontSize:14,opacity:0.8}}/>
+                  <div style={{lineHeight:1.45,flex:1,wordBreak:"break-word"}}>{msg.message}</div>
+                </div>
+              ))}
+            </div>
+          )}
           <textarea value={feedback} onChange={e=>setFeedback(e.target.value)} onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")submit();}}
-            placeholder={"What to change or add?\n\nExamples:\n• Add a Redis cache layer\n• Remove auth, make it public\n• Add email notification service"}
+            placeholder={"Ask a question or request a change...\n\nExamples:\n• Where is the database located?\n• Add a Redis cache layer"}
             style={{width:"100%",minHeight:90,resize:"vertical",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",fontSize:13,padding:"10px 12px",lineHeight:1.55,outline:"none",boxSizing:"border-box"}}
           />
           {attachedFiles.map((af,i)=>(
@@ -691,9 +712,9 @@ function FeedbackPanel({arch,onRefine}){
               <i className="ti ti-paperclip" style={{fontSize:13}}/> Attach
             </button>
             <div style={{flex:1}}/>
-            <button onClick={()=>{setOpen(false);setFeedback("");setErr(null);setAttachedFiles([]);}} style={{background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"6px 14px",fontSize:12,color:"var(--color-text-secondary)",cursor:"pointer",fontFamily:"var(--font-sans)"}}>Cancel</button>
+            <button onClick={()=>{setOpen(false);setFeedback("");setErr(null);setAttachedFiles([]);setChatHistory([]);}} style={{background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"6px 14px",fontSize:12,color:"var(--color-text-secondary)",cursor:"pointer",fontFamily:"var(--font-sans)"}}>Cancel</button>
             <button onClick={submit} disabled={loading||(!feedback.trim()&&!attachedFiles.length)} className="run-btn" style={{padding:"6px 16px",fontSize:12}}>
-              {loading?(<span style={{display:"flex",alignItems:"center",gap:6}}><span className="dots">{[0,1,2].map(i=><span key={i} className={"dot dot"+i}/>)}</span>{uploading?"Extracting...":"Refining..."}</span>):<><i className="ti ti-refresh-dot"/> Refine ↗</>}
+              {loading?(<span style={{display:"flex",alignItems:"center",gap:6}}><span className="dots">{[0,1,2].map(i=><span key={i} className={"dot dot"+i}/>)}</span>{uploading?"Extracting...":"Reasoning..."}</span>):<><i className="ti ti-brain"/> Reason ↗</>}
             </button>
           </div>
         </div>
