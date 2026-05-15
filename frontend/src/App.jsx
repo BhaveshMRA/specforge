@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 const COLORS = {
   blue:"#378ADD", purple:"#7F77DD", teal:"#1D9E75",
@@ -565,9 +565,361 @@ function LayerRow({layer,idx,total}){
   );
 }
 
-// ── Architecture Output ───────────────────────────────────────────────────────
+// ── Feedback Panel ────────────────────────────────────────────────────────────
 
-function ArchDiagram({arch}){
+function computeChangelog(oldArch, newArch){
+  const changes=[];
+  // Always: summary comparison
+  const ol=(oldArch.layers||[]), nl=(newArch.layers||[]);
+  const oc_total=ol.reduce((s,l)=>s+(l.components||[]).length,0);
+  const nc_total=nl.reduce((s,l)=>s+(l.components||[]).length,0);
+  changes.push({type:"modified",label:`Layers: ${ol.length} → ${nl.length}  ·  Components: ${oc_total} → ${nc_total}  ·  Flows: ${(oldArch.key_flows||[]).length} → ${(newArch.key_flows||[]).length}`});
+  
+  // Project rename
+  if(oldArch.project_name!==newArch.project_name) changes.push({type:"modified",label:`Project renamed: "${oldArch.project_name}" → "${newArch.project_name}"`});
+  if(oldArch.summary!==newArch.summary) changes.push({type:"modified",label:`Project summary updated`});
+
+  // Structural layer diff by ID
+  const oldMap=new Map(ol.map(l=>[l.id,l]));
+  const newMap=new Map(nl.map(l=>[l.id,l]));
+  
+  for(const [id,l] of newMap) {
+    if(!oldMap.has(id)) changes.push({type:"added",label:`New layer: ${l.name}`});
+    else {
+      const o=oldMap.get(id);
+      if(o.name!==l.name) changes.push({type:"modified",label:`Layer renamed: ${o.name} → ${l.name}`});
+      if(o.description!==l.description) changes.push({type:"modified",label:`Layer description updated: ${l.name}`});
+    }
+  }
+  for(const [id,l] of oldMap) if(!newMap.has(id)) changes.push({type:"removed",label:`Removed layer: ${l.name}`});
+  
+  // Component diff per layer
+  for(const [id,olay] of oldMap){
+    const nlay=newMap.get(id); if(!nlay) continue;
+    const ocm=new Map((olay.components||[]).map(c=>[c.id,c]));
+    const ncm=new Map((nlay.components||[]).map(c=>[c.id,c]));
+    for(const [cid,c] of ncm) {
+      if(!ocm.has(cid)) changes.push({type:"added",label:`Added to ${nlay.name}: ${c.name} (${c.tech})`});
+      else {
+        const o=ocm.get(cid);
+        if(o.name!==c.name) changes.push({type:"modified",label:`Renamed in ${nlay.name}: ${o.name} → ${c.name}`});
+        if(o.tech!==c.tech) changes.push({type:"modified",label:`Tech changed for ${c.name}: ${o.tech} → ${c.tech}`});
+        if(o.purpose!==c.purpose) changes.push({type:"modified",label:`Purpose updated for ${c.name}`});
+        const oc_conn = (o.connects_to||[]).join(",");
+        const nc_conn = (c.connects_to||[]).join(",");
+        if(oc_conn!==nc_conn) changes.push({type:"modified",label:`Connections updated for ${c.name}`});
+      }
+    }
+    for(const [cid,c] of ocm) if(!ncm.has(cid)) changes.push({type:"removed",label:`Removed from ${olay.name}: ${c.name}`});
+  }
+  return changes;
+}
+
+function FeedbackPanel({arch,onRefine}){
+  const [open,setOpen]=useState(false);
+  const [feedback,setFeedback]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState(null);
+  const [changelog,setChangelog]=useState([]);
+  const [previousArch,setPreviousArch]=useState(null);
+  const [attachedFiles,setAttachedFiles]=useState([]);
+  const [uploading,setUploading]=useState(false);
+  const fileRef=React.useRef(null);
+
+  function handleFile(e){
+    const files=Array.from(e.target.files||[]);
+    if(files.length) setAttachedFiles(prev=>[...prev,...files.map(f=>({file:f,name:f.name}))]);
+    e.target.value="";
+  }
+  function removeFile(i){setAttachedFiles(prev=>prev.filter((_,idx)=>idx!==i));}
+
+  async function submit(){
+    if((!feedback.trim()&&!attachedFiles.length)||loading)return;
+    setLoading(true);setErr(null);
+    try{
+      let ctx=feedback.trim();
+      if(attachedFiles.length){
+        setUploading(true);
+        for(const af of attachedFiles){
+          const form=new FormData();form.append("file",af.file);
+          const ur=await fetch("/api/upload",{method:"POST",body:form});
+          const ud=await ur.json();
+          if(!ur.ok)throw new Error(ud.detail||"File upload failed");
+          ctx+=`\n\n[DOCUMENT: ${af.name}]\n${ud.extracted_text}`;
+        }
+        if(!feedback.trim()) ctx="Refine based on attached documents."+ctx;
+        setUploading(false);
+      }
+      const res=await fetch("/api/refine",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({existing_arch:arch,feedback:ctx})});
+      const data=await res.json();
+      if(!res.ok)throw new Error(data.detail||"Refinement failed");
+      setPreviousArch(arch);
+      setChangelog(computeChangelog(arch,data));
+      onRefine(data);
+      setFeedback("");setAttachedFiles([]);setOpen(false);
+    }catch(e){setErr(e.message||"Refinement failed.");}
+    finally{setLoading(false);setUploading(false);}
+  }
+
+  const CLR={added:"#1D9E75",removed:"#D85A30",modified:"#378ADD"};
+  const ICO={added:"ti-plus",removed:"ti-minus",modified:"ti-arrows-exchange"};
+
+  return(
+    <div style={{marginTop:16,borderTop:"0.5px solid var(--color-border-tertiary)",paddingTop:12}}>
+      <button onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",fontSize:12,fontWeight:600,color:open?"var(--color-text-primary)":"var(--color-text-tertiary)",padding:"4px 0",transition:"color 0.2s",fontFamily:"var(--font-sans)"}}>
+        <i className={"ti "+(open?"ti-chevron-up":"ti-pencil")} style={{fontSize:13}}/>
+        {open?"Close":"Refine Architecture ✏️"}
+      </button>
+
+      {open&&(
+        <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}} className="fade-up">
+          <textarea value={feedback} onChange={e=>setFeedback(e.target.value)} onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")submit();}}
+            placeholder={"What to change or add?\n\nExamples:\n• Add a Redis cache layer\n• Remove auth, make it public\n• Add email notification service"}
+            style={{width:"100%",minHeight:90,resize:"vertical",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",fontSize:13,padding:"10px 12px",lineHeight:1.55,outline:"none",boxSizing:"border-box"}}
+          />
+          {attachedFiles.map((af,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 10px",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--radius-sm)"}}>
+              <i className={uploading?"ti ti-loader":"ti ti-paperclip"} style={{fontSize:12,color:"var(--color-text-tertiary)",animation:uploading?"spin 1s linear infinite":"none"}}/>
+              <span style={{fontSize:12,color:"var(--color-text-secondary)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{af.name}</span>
+              <button onClick={()=>removeFile(i)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--color-text-tertiary)",fontSize:15,lineHeight:1}}>×</button>
+            </div>
+          ))}
+          {err&&<p style={{margin:0,fontSize:12,color:"#D85A30"}}>{err}</p>}
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <input ref={fileRef} type="file" multiple accept=".pdf,.docx,.pptx,.png,.jpg,.jpeg,.webp" style={{display:"none"}} onChange={handleFile}/>
+            <button onClick={()=>fileRef.current?.click()} disabled={loading} title="Attach file" style={{background:"none",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--radius-sm)",padding:"5px 10px",fontSize:11,color:"var(--color-text-tertiary)",cursor:"pointer",display:"flex",alignItems:"center",gap:4,fontFamily:"var(--font-sans)"}}>
+              <i className="ti ti-paperclip" style={{fontSize:13}}/> Attach
+            </button>
+            <div style={{flex:1}}/>
+            <button onClick={()=>{setOpen(false);setFeedback("");setErr(null);setAttachedFiles([]);}} style={{background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"6px 14px",fontSize:12,color:"var(--color-text-secondary)",cursor:"pointer",fontFamily:"var(--font-sans)"}}>Cancel</button>
+            <button onClick={submit} disabled={loading||(!feedback.trim()&&!attachedFiles.length)} className="run-btn" style={{padding:"6px 16px",fontSize:12}}>
+              {loading?(<span style={{display:"flex",alignItems:"center",gap:6}}><span className="dots">{[0,1,2].map(i=><span key={i} className={"dot dot"+i}/>)}</span>{uploading?"Extracting...":"Refining..."}</span>):<><i className="ti ti-refresh-dot"/> Refine ↗</>}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {changelog.length>0&&(
+        <div style={{marginTop:12,padding:"12px 14px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--radius-md)"}} className="fade-up">
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10,fontSize:12,fontWeight:600,color:"var(--color-text-primary)",fontFamily:"var(--font-sans)"}}>
+            <i className="ti ti-git-compare" style={{fontSize:14,color:"var(--color-text-secondary)"}}/>
+            Change Log
+            <span style={{marginLeft:"auto",fontSize:10,fontWeight:400,color:"var(--color-text-tertiary)"}}>{changelog.length} change{changelog.length!==1?"s":""}</span>
+            {previousArch&&(
+              <button onClick={()=>{onRefine(previousArch);setChangelog([]);setPreviousArch(null);}} title="Undo this refinement" style={{marginLeft:10,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"3px 8px",fontSize:10,color:"var(--color-text-primary)",cursor:"pointer",display:"flex",alignItems:"center",gap:4,fontFamily:"var(--font-sans)",transition:"all 0.15s"}}>
+                <i className="ti ti-arrow-back-up" style={{fontSize:12}}/> Rollback
+              </button>
+            )}
+          </div>
+          {changelog.map((c,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"4px 0",borderTop:i>0?"0.5px solid var(--color-border-tertiary)":"none"}}>
+              <i className={"ti "+ICO[c.type]} style={{fontSize:11,color:CLR[c.type],marginTop:2,flexShrink:0}}/>
+              <span style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.45,fontFamily:"var(--font-sans)"}}>{c.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SavePanel({arch, activeSaveId, onSaveComplete}){
+  const [open,setOpen]=useState(false);
+  const [name,setName]=useState("");
+  const [saving,setSaving]=useState(false);
+  const [toast,setToast]=useState(false);
+  const [err,setErr]=useState(null);
+
+  async function save(){
+    if(!name.trim()||saving)return;
+    setSaving(true);setErr(null);
+    try{
+      const res=await fetch("/api/saves",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({name:name.trim(),arch}),
+      });
+      const d=await res.json();
+      if(!res.ok)throw new Error(d.detail||"Save failed");
+      if(onSaveComplete) onSaveComplete(d.id);
+      setOpen(false);setName("");
+      setToast(true);
+      setTimeout(()=>setToast(false),2500);
+    }catch(e){
+      setErr(e.message||"Save failed.");
+    }finally{
+      setSaving(false);
+    }
+  }
+
+  async function overwrite(){
+    if(!activeSaveId)return;
+    setSaving(true);setErr(null);
+    try{
+      const r=await fetch(`/api/saves/${activeSaveId}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"overwrite",arch})});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||"Overwrite failed");
+      setToast(true);setTimeout(()=>setToast(false),2500);
+      setOpen(false);
+    }catch(e){setErr(e.message||"Failed to overwrite");}
+    finally{setSaving(false);}
+  }
+
+  return(
+    <div style={{position:"relative"}}>
+      {/* Toast */}
+      {toast&&(
+        <div style={{
+          position:"fixed",bottom:24,right:24,
+          background:"#1D9E75",color:"#fff",
+          borderRadius:"var(--radius-md)",
+          padding:"10px 18px",fontSize:13,fontWeight:600,
+          display:"flex",alignItems:"center",gap:8,
+          boxShadow:"0 4px 20px #00000044",
+          zIndex:200,animation:"fadeUp 0.3s ease",
+        }}>
+          <i className="ti ti-check"/> Saved!
+        </div>
+      )}
+
+      <div style={{
+        marginTop:12,
+        display:"flex",alignItems:"center",justifyContent:"center",
+        borderTop:"0.5px solid var(--color-border-tertiary)",
+        paddingTop:14,gap:10,
+      }}>
+        {!open?(
+          <div style={{display:"flex",gap:8}}>
+            {activeSaveId && (
+              <button onClick={overwrite} disabled={saving} style={{
+                display:"flex",alignItems:"center",gap:6,
+                background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",
+                borderRadius:"var(--radius-sm)",padding:"7px 16px",
+                fontSize:12,color:"var(--color-text-secondary)",cursor:"pointer",
+                fontFamily:"var(--font-sans)",transition:"all 0.2s ease",
+              }}>
+                <i className={saving?"ti ti-loader":"ti ti-refresh"} style={{animation:saving?"spin 1s linear infinite":"none", fontSize:13}}/> Overwrite
+              </button>
+            )}
+            <button onClick={()=>setOpen(true)} style={{
+              display:"flex",alignItems:"center",gap:6,
+              background:"none",border:"0.5px solid var(--color-border-secondary)",
+              borderRadius:"var(--radius-sm)",padding:"7px 16px",
+              fontSize:12,color:"var(--color-text-secondary)",cursor:"pointer",
+              fontFamily:"var(--font-sans)",transition:"all 0.2s ease",
+            }}>
+              <i className="ti ti-device-floppy" style={{fontSize:13}}/> {activeSaveId ? "Save As" : "Save Architecture"}
+            </button>
+          </div>
+        ):(
+          <div style={{display:"flex",alignItems:"center",gap:8,flex:1,maxWidth:420}} className="fade-up">
+            <input
+              autoFocus
+              value={name}
+              onChange={e=>setName(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter")save();if(e.key==="Escape"){setOpen(false);setName("");}}}
+              placeholder={"Name this architecture..."}
+              style={{
+                flex:1,height:34,
+                background:"var(--color-background-secondary)",
+                border:"0.5px solid var(--color-border-secondary)",
+                borderRadius:"var(--radius-sm)",
+                color:"var(--color-text-primary)",
+                fontFamily:"var(--font-sans)",fontSize:13,
+                padding:"0 10px",outline:"none",
+              }}
+            />
+            <button onClick={()=>{setOpen(false);setName("");setErr(null);}} style={{
+              background:"none",border:"none",cursor:"pointer",
+              color:"var(--color-text-tertiary)",padding:"0 4px",fontSize:16,
+            }}>×</button>
+            <button onClick={save} disabled={saving||!name.trim()} className="run-btn" style={{padding:"6px 14px",fontSize:12,height:34}}>
+              {saving?"Saving...":"Save ↗"}
+            </button>
+          </div>
+        )}
+      </div>
+      {err&&<p style={{textAlign:"center",margin:"6px 0 0",fontSize:12,color:"#D85A30"}}>{err}</p>}
+    </div>
+  );
+}
+
+// ── Hamburger Sidebar ──────────────────────────────────────────────────────────
+
+function HamburgerSidebar({onLoad,theme,onToggleTheme}){
+  const [open,setOpen]=useState(false);
+  const [saves,setSaves]=useState([]);
+  const [loadingList,setLoadingList]=useState(false);
+  const [deletingId,setDeletingId]=useState(null);
+
+  async function fetchSaves(){setLoadingList(true);try{const d=await fetch("/api/saves").then(r=>r.json());setSaves(Array.isArray(d)?d:[]);}catch{setSaves([]);}finally{setLoadingList(false);}}
+  function toggle(){if(!open)fetchSaves();setOpen(o=>!o);}
+  async function loadSave(id){const d=await fetch(`/api/saves/${id}`).then(r=>r.json());onLoad(d.arch, id);setOpen(false);}
+  async function deleteSave(e,id){e.stopPropagation();setDeletingId(id);await fetch(`/api/saves/${id}`,{method:"DELETE"});setSaves(s=>s.filter(x=>x.id!==id));setDeletingId(null);}
+  function fmt(iso){return new Date(iso).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});}
+
+  return(
+    <>
+      <button onClick={toggle} aria-label="Menu" style={{position:"fixed",top:16,left:16,zIndex:300,width:38,height:38,borderRadius:"var(--radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",boxShadow:"0 2px 8px #00000033"}}>
+        <i className={"ti "+(open?"ti-x":"ti-menu-2")} style={{fontSize:17,color:"var(--color-text-secondary)"}}/>
+      </button>
+
+      {open&&<div onClick={()=>setOpen(false)} style={{position:"fixed",inset:0,background:"#00000055",zIndex:290,animation:"fadeIn 0.2s ease"}}/>}
+
+      <div style={{position:"fixed",top:0,left:0,bottom:0,width:280,background:"var(--color-background-secondary)",borderRight:"0.5px solid var(--color-border-secondary)",zIndex:295,transform:open?"translateX(0)":"translateX(-100%)",transition:"transform 0.3s cubic-bezier(0.4,0,0.2,1)",display:"flex",flexDirection:"column",boxShadow:open?"4px 0 24px #00000044":"none"}}>
+        
+        {/* Header */}
+        <div style={{padding:"20px 16px 14px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+            <i className="ti ti-code-circle-2" style={{fontSize:16,color:"var(--color-text-secondary)"}}/>
+            <span style={{fontWeight:700,fontSize:14,color:"var(--color-text-primary)",fontFamily:"var(--font-sans)"}}>SpecForge</span>
+          </div>
+          <span style={{fontSize:11,color:"var(--color-text-tertiary)",fontFamily:"var(--font-sans)"}}>Architect Agent</span>
+        </div>
+
+        {/* Theme toggle */}
+        <div style={{padding:"12px 16px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <span style={{fontSize:12,color:"var(--color-text-secondary)",fontFamily:"var(--font-sans)"}}>Appearance</span>
+            <button onClick={onToggleTheme} style={{display:"flex",alignItems:"center",gap:6,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"5px 10px",cursor:"pointer",fontSize:11,color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",transition:"all 0.2s ease"}}>
+              <i className={"ti "+(theme==="dark"?"ti-sun":"ti-moon")} style={{fontSize:13}}/>
+              {theme==="dark"?"Light":"Dark"}
+            </button>
+          </div>
+        </div>
+
+        {/* Saves list */}
+        <div style={{flex:1,overflowY:"auto",padding:"12px 0"}}>
+          <div style={{padding:"0 16px 8px",fontSize:10,fontWeight:700,letterSpacing:"0.8px",color:"var(--color-text-tertiary)",textTransform:"uppercase",fontFamily:"var(--font-sans)"}}>Saved Architectures</div>
+          {loadingList&&<div style={{padding:"20px 16px",color:"var(--color-text-tertiary)",fontSize:13,textAlign:"center"}}>Loading...</div>}
+          {!loadingList&&saves.length===0&&(
+            <div style={{padding:"20px 16px",color:"var(--color-text-tertiary)",fontSize:13,textAlign:"center"}}>
+              <i className="ti ti-database-off" style={{fontSize:22,display:"block",marginBottom:8,opacity:0.4}}/>No saved architectures yet
+            </div>
+          )}
+          {saves.map(s=>(
+            <div key={s.id} onClick={()=>loadSave(s.id)} style={{padding:"10px 16px",cursor:"pointer",display:"flex",alignItems:"flex-start",gap:10,borderLeft:"2px solid transparent",transition:"all 0.15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="var(--color-background-primary)";e.currentTarget.style.borderLeftColor="#378ADD";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.borderLeftColor="transparent";}}>
+              <i className="ti ti-topology-star-2" style={{fontSize:14,color:"var(--color-text-tertiary)",marginTop:2,flexShrink:0}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:500,color:"var(--color-text-primary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontFamily:"var(--font-sans)"}}>{s.name}</div>
+                <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginTop:2,fontFamily:"var(--font-sans)"}}>
+                  {s.project_name&&<span style={{marginRight:6,color:"var(--color-text-secondary)"}}>{s.project_name}</span>}{fmt(s.created_at)}
+                </div>
+              </div>
+              <button onClick={e=>deleteSave(e,s.id)} disabled={deletingId===s.id} style={{background:"none",border:"none",cursor:"pointer",color:"var(--color-text-tertiary)",fontSize:14,padding:"2px 4px",opacity:0.5}} onMouseEnter={e=>e.currentTarget.style.opacity="1"} onMouseLeave={e=>e.currentTarget.style.opacity="0.5"} aria-label="Delete">
+                {deletingId===s.id?<i className="ti ti-loader" style={{animation:"spin 1s linear infinite"}}/>:<i className="ti ti-trash"/>}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ArchDiagram({arch,onRefine,checkpoints,onCheckpoint,onLoadCheckpoint,activeSaveId,onSaveComplete}){
   const [view,setView]=useState("diagram");
   const [showJSON,setShowJSON]=useState(false);
   const numLayers=(arch.layers||[]).length;
@@ -580,6 +932,17 @@ function ArchDiagram({arch}){
           <p className="arch-summary">{arch.summary}</p>
         </div>
         <div className="arch-controls">
+          {checkpoints && checkpoints.length > 0 && (
+            <select onChange={e=>{const cp=checkpoints[e.target.value]; if(cp)onLoadCheckpoint(cp.arch);}} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",padding:"4px 8px",fontSize:11,color:"var(--color-text-secondary)",fontFamily:"var(--font-sans)",cursor:"pointer",outline:"none"}}>
+              <option value="">Jump to Checkpoint...</option>
+              {checkpoints.map((cp,i)=>(
+                <option key={i} value={i}>🚩 {cp.time}</option>
+              ))}
+            </select>
+          )}
+          <button className="json-btn" onClick={onCheckpoint} title="Create Checkpoint">
+            <i className="ti ti-flag"/> Checkpoint
+          </button>
           <div className="view-toggle">
             {[
               ["diagram","ti-topology-star-2","Diagram"],
@@ -637,6 +1000,10 @@ function ArchDiagram({arch}){
           ))}
         </div>
       )}
+
+      {/* Feedback + Save */}
+      <FeedbackPanel arch={arch} onRefine={onRefine}/>
+      <SavePanel arch={arch} activeSaveId={activeSaveId} onSaveComplete={onSaveComplete}/>
     </div>
   );
 }
@@ -649,18 +1016,62 @@ export default function SpecForge(){
   const [phase,setPhase]=useState("");
   const [arch,setArch]=useState(null);
   const [error,setError]=useState(null);
+  const [activeSaveId,setActiveSaveId]=useState(null);
+  const [checkpoints,setCheckpoints]=useState([]);
+  // ── Theme ───────────────────────────────────────────────────────────────
+  const prefersDark=window.matchMedia("(prefers-color-scheme:dark)").matches;
+  const [theme,setTheme]=useState(prefersDark?"dark":"light");
+  React.useEffect(()=>{document.documentElement.setAttribute("data-theme",theme);},[theme]);
+  function toggleTheme(){setTheme(t=>t==="dark"?"light":"dark");}
 
+  // ── File attachment state ──────────────────────────────────────────────────
+  const [attachedFiles,setAttachedFiles]=useState([]);   // [{file, name, charCount, extractedText}]
+  const [uploading,setUploading]=useState(false);
+  const fileInputRef=React.useRef(null);
+
+  function handleFileSelect(e){
+    const files=Array.from(e.target.files||[]);
+    if(files.length) setAttachedFiles(prev=>[...prev,...files.map(f=>({file:f,name:f.name,charCount:null,extractedText:null}))]);
+    e.target.value="";
+  }
+
+  function removeFile(i){setAttachedFiles(prev=>prev.filter((_,idx)=>idx!==i));}
+
+  // ── Run ───────────────────────────────────────────────────────────────────
   async function run(){
-    if(!spec.trim()||loading)return;
-    setLoading(true);setError(null);setArch(null);
+    if((!spec.trim()&&!attachedFiles.length)||loading)return;
+    setLoading(true);setError(null);setArch(null);setCheckpoints([]);setActiveSaveId(null);
+
     const phases=["Parsing spec...","Identifying layers...","Mapping components...","Building diagram..."];
     let pi=0; setPhase(phases[0]);
     const iv=setInterval(()=>{pi=(pi+1)%phases.length;setPhase(phases[pi]);},950);
+
     try{
+      let combinedSpec=spec.trim();
+
+      // Step 1: If files attached, extract text from each
+      if(attachedFiles.length){
+        setUploading(true);
+        setPhase("Extracting document...");
+        for(let i=0;i<attachedFiles.length;i++){
+          const af=attachedFiles[i];
+          const form=new FormData();form.append("file",af.file);
+          const upRes=await fetch("/api/upload",{method:"POST",body:form});
+          const upData=await upRes.json();
+          if(!upRes.ok)throw new Error(upData.detail||"File extraction failed");
+          setAttachedFiles(prev=>prev.map((f,idx)=>idx===i?{...f,charCount:upData.char_count}:f));
+          combinedSpec+=`\n\n[DOCUMENT: ${af.name}]\n${upData.extracted_text}`;
+        }
+        if(!spec.trim()) combinedSpec="Architect a system based on attached documents."+combinedSpec;
+        setUploading(false);
+      }
+
+      // Step 2: Generate architecture
+      setPhase(phases[0]);
       const res=await fetch("/api/architect",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({spec}),
+        body:JSON.stringify({spec:combinedSpec}),
       });
       const data=await res.json();
       if(!res.ok)throw new Error(data.detail||"Architecture generation failed");
@@ -668,28 +1079,70 @@ export default function SpecForge(){
     }catch(e){
       setError(e.message||"Architecture generation failed.");
     }finally{
-      clearInterval(iv);setLoading(false);
+      clearInterval(iv);setLoading(false);setUploading(false);
     }
   }
 
+  const canRun=!loading&&(spec.trim().length>0||attachedFiles.length>0);
+
   return(
     <div className="app">
+      <HamburgerSidebar onLoad={(data, id)=>{setArch(data);setActiveSaveId(id);setSpec("");setAttachedFiles([]);setCheckpoints([]);}} theme={theme} onToggleTheme={toggleTheme}/>
       <div className="app-header">
         <div className="app-title-row">
           <i className="ti ti-code-circle-2" aria-hidden="true"/>
           <span className="app-title">SpecForge</span>
           <span className="phase-badge">Phase 1 · Architect</span>
         </div>
-        <p className="app-subtitle">Describe your idea in plain English. Get a layered architecture with visual flow diagram.</p>
+        <p className="app-subtitle">Describe your idea in plain English. Attach a PDF, Word, or PPT for extra context.</p>
       </div>
+
       <div className="input-panel">
         <textarea value={spec} onChange={e=>setSpec(e.target.value)}
           onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")run();}}
-          placeholder={"Describe your product idea...\n\nExamples:\n• AI-powered ATS\n• Chatbot application\n• Research agent that reads arXiv papers"}
+          placeholder={"Describe your product idea...\n\nExamples:\n• Build me an ATS app using the inputs of this PDF\n• AI-powered chatbot for customer support\n• Research agent that reads arXiv papers"}
         />
+
+        {/* File badge */}
+        {attachedFiles.map((af,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:"var(--color-background-primary)",borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+            <i className={uploading?"ti ti-loader":"ti ti-paperclip"} style={{fontSize:13,color:"var(--color-text-tertiary)",animation:uploading?"spin 1s linear infinite":"none"}}/>
+            <span style={{fontSize:12,color:"var(--color-text-secondary)",fontFamily:"var(--font-sans)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {af.name}
+              {af.charCount&&<span style={{marginLeft:6,color:"var(--color-text-tertiary)",fontSize:11}}>· {(af.charCount/1000).toFixed(1)}k chars</span>}
+            </span>
+            <button onClick={()=>removeFile(i)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--color-text-tertiary)",fontSize:16,padding:"0 2px",lineHeight:1}}>×</button>
+          </div>
+        ))}
+
         <div className="input-footer">
-          <span className="shortcut-hint">⌘↩ to run</span>
-          <button onClick={run} disabled={loading||!spec.trim()} className="run-btn">
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.docx,.pptx,.png,.jpg,.jpeg,.webp"
+            multiple
+            style={{display:"none"}}
+            onChange={handleFileSelect}
+          />
+          {/* Attach button */}
+          <button
+            onClick={()=>fileInputRef.current?.click()}
+            disabled={loading}
+            title="Attach PDF, Word, PPT, or image"
+            style={{
+              background:"none",border:"none",cursor:"pointer",
+              color:attachedFiles.length?"var(--color-text-primary)":"var(--color-text-tertiary)",
+              display:"flex",alignItems:"center",gap:5,
+              fontSize:12,padding:"4px 6px",borderRadius:"var(--radius-sm)",
+              fontFamily:"var(--font-sans)",transition:"color 0.2s ease",
+            }}>
+            <i className="ti ti-paperclip" style={{fontSize:15}}/>
+            {!attachedFiles.length&&<span style={{fontSize:11}}>Attach</span>}
+          </button>
+
+          <span className="shortcut-hint" style={{marginLeft:"auto"}}>⌘↩ to run</span>
+          <button onClick={run} disabled={!canRun} className="run-btn">
             {loading?(
               <span className="loading-row">
                 <span className="dots">{[0,1,2].map(i=><span key={i} className={"dot dot"+i}/>)}</span>
@@ -699,8 +1152,9 @@ export default function SpecForge(){
           </button>
         </div>
       </div>
+
       {error&&<p className="error-msg"><i className="ti ti-alert-triangle" aria-hidden="true"/> {error}</p>}
-      {arch&&<ArchDiagram arch={arch}/>}
+      {arch&&<ArchDiagram arch={arch} onRefine={setArch} checkpoints={checkpoints} onCheckpoint={()=>{setCheckpoints(prev=>[...prev,{time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),arch}])}} onLoadCheckpoint={setArch} activeSaveId={activeSaveId} onSaveComplete={setActiveSaveId}/>}
     </div>
   );
 }
