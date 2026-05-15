@@ -947,38 +947,38 @@ function ArchDiagram({arch,onRefine,checkpoints,onCheckpoint,onLoadCheckpoint,ac
   const flowDelay=0.06+numLayers*0.13+0.2;
   return(
     <div className="arch-output">
-      <div className="arch-header fade-up">
-        <div className="arch-header-left">
-          <h3 className="arch-title">{arch.project_name}</h3>
-          <p className="arch-summary">{arch.summary}</p>
-        </div>
-        <div className="arch-controls">
-          {checkpoints && checkpoints.length > 0 && (
-            <select onChange={e=>{const cp=checkpoints[e.target.value]; if(cp)onLoadCheckpoint(cp.arch);}} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",padding:"4px 8px",fontSize:11,color:"var(--color-text-secondary)",fontFamily:"var(--font-sans)",cursor:"pointer",outline:"none"}}>
-              <option value="">Jump to Checkpoint...</option>
-              {checkpoints.map((cp,i)=>(
-                <option key={i} value={i}>🚩 {cp.time}</option>
+      <div className="arch-header fade-up" style={{flexDirection:"column", alignItems:"stretch"}}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", width:"100%", gap:"12px", flexWrap:"wrap"}}>
+          <h3 className="arch-title" style={{marginBottom:0}}>{arch.project_name}</h3>
+          <div className="arch-controls">
+            {checkpoints && checkpoints.length > 0 && (
+              <select onChange={e=>{const cp=checkpoints[e.target.value]; if(cp)onLoadCheckpoint(cp.arch);}} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",padding:"4px 8px",fontSize:11,color:"var(--color-text-secondary)",fontFamily:"var(--font-sans)",cursor:"pointer",outline:"none"}}>
+                <option value="">Jump to Checkpoint...</option>
+                {checkpoints.map((cp,i)=>(
+                  <option key={i} value={i}>🚩 {cp.time}</option>
+                ))}
+              </select>
+            )}
+            <button className="json-btn" onClick={onCheckpoint} title="Create Checkpoint">
+              <i className="ti ti-flag"/> Checkpoint
+            </button>
+            <div className="view-toggle">
+              {[
+                ["diagram","ti-topology-star-2","Diagram"],
+                ["cards","ti-layout-rows","Cards"],
+                ["animate","ti-player-play","Animate"],
+              ].map(([v,ic,label])=>(
+                <button key={v} onClick={()=>setView(v)} className={"toggle-btn"+(view===v?" active":"")}>
+                  <i className={"ti "+ic} aria-hidden="true"/>{label}
+                </button>
               ))}
-            </select>
-          )}
-          <button className="json-btn" onClick={onCheckpoint} title="Create Checkpoint">
-            <i className="ti ti-flag"/> Checkpoint
-          </button>
-          <div className="view-toggle">
-            {[
-              ["diagram","ti-topology-star-2","Diagram"],
-              ["cards","ti-layout-rows","Cards"],
-              ["animate","ti-player-play","Animate"],
-            ].map(([v,ic,label])=>(
-              <button key={v} onClick={()=>setView(v)} className={"toggle-btn"+(view===v?" active":"")}>
-                <i className={"ti "+ic} aria-hidden="true"/>{label}
-              </button>
-            ))}
+            </div>
+            <button className="json-btn" onClick={()=>setShowJSON(p=>!p)}>
+              <i className="ti ti-code" aria-hidden="true"/> {showJSON?"Hide":"JSON"}
+            </button>
           </div>
-          <button className="json-btn" onClick={()=>setShowJSON(p=>!p)}>
-            <i className="ti ti-code" aria-hidden="true"/> {showJSON?"Hide":"JSON"}
-          </button>
         </div>
+        <p className="arch-summary" style={{marginTop:10}}>{arch.summary}</p>
       </div>
 
       {showJSON&&<pre className="json-block fade-up">{JSON.stringify(arch,null,2)}</pre>}

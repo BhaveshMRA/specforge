@@ -6,6 +6,7 @@ import json
 import os
 import io
 import base64
+import re
 from dotenv import load_dotenv
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -138,10 +139,12 @@ async def call_ollama(messages: list) -> dict:
                             detail=f"Ollama API error: {response.text}")
     raw = response.json()["choices"][0]["message"]["content"]
     cleaned = raw.replace("```json", "").replace("```", "").strip()
+    # Sanitize invalid \u escapes (e.g. \u followed by non-hex or end of string)
+    cleaned = re.sub(r'\\u(?![0-9a-fA-F]{4})', r'\\\\u', cleaned)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse JSON: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse JSON: {e}\n\nRaw text: {cleaned}")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────

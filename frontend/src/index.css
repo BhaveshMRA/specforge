@@ -60,7 +60,7 @@ body{font-family:var(--font-sans);background:var(--color-background-secondary);c
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 @keyframes blink{0%,100%{opacity:.25}50%{opacity:1}}
 .fade-up{opacity:0;animation:fadeUp 0.35s ease forwards;}
-.app{max-width:740px;margin:0 auto;padding:2.5rem 1.5rem 4rem;}
+.app{max-width:880px;margin:0 auto;padding:2.5rem 1.5rem 4rem;}
 .app-header{margin-bottom:1.5rem;}
 .app-title-row{display:flex;align-items:center;gap:10px;margin-bottom:5px;}
 .app-title-row .ti{font-size:20px;color:var(--color-text-secondary);}
