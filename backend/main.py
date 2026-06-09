@@ -132,7 +132,7 @@ async def call_ollama(messages: list) -> dict:
                 "Authorization": f"Bearer {OLLAMA_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={"model": "gemma4:31b", "messages": messages, "temperature": 0.3},
+            json={"model": "gemma4:31b-cloud", "messages": messages, "temperature": 0.3},
         )
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code,
@@ -273,7 +273,7 @@ async def upload_file(file: UploadFile = File(...)):
                 headers={"Authorization": f"Bearer {OLLAMA_API_KEY}",
                          "Content-Type": "application/json"},
                 json={
-                    "model": "gemma4:31b",
+                    "model": "gemma4:31b-cloud",
                     "messages": [{
                         "role": "user",
                         "content": [
