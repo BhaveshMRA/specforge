@@ -16,6 +16,10 @@ import ast
 import shutil
 import subprocess
 import tempfile
+import sys
+import socket
+import time
+import atexit
 from dotenv import load_dotenv
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -111,10 +115,18 @@ CODER_PROMPT = """You are a senior full-stack engineer. You receive a system arc
 
 CRITICAL RULES:
 1. Map each component's "tech" field to a real, working implementation — no placeholders, no TODOs, no lorem ipsum.
-2. Keep it lean: one clear entry point per side (e.g. backend/main.py, frontend/src/App.jsx), plus only the extra files strictly needed (models, one route file, minimal styling). 6-14 files total.
+2. Keep it lean on the backend: one clear entry point (e.g. backend/main.py), plus only the extra files strictly needed (models, one route file). On the frontend, decompose into real components instead of one giant App.jsx — separate files for the header, each form, each panel/dashboard section, and reusable pieces (e.g. a Card, a StatBadge) if the UI has repeated visual patterns. 10-20 files total is normal for a UI with more than one screen section.
 3. Prefer boring, standard choices consistent with the component's stated tech (e.g. "PostgreSQL" -> SQLAlchemy models + schema; "React" -> a working App.jsx that calls the backend). If a tech name is vague, pick the most common concrete implementation.
 4. Code must actually run together: consistent imports, matching route paths between frontend fetch calls and backend routes, a requirements.txt / package.json listing exactly the dependencies used.
 5. Include run_instructions: the exact shell commands to install and start it.
+6. Backend must be directly runnable with no extra flags. If Python: backend/main.py ending with `if __name__ == "__main__": import uvicorn; uvicorn.run(app, host="0.0.0.0", port=8000)` — do not rely on a separate `uvicorn` command. If Node: backend/main.js listening on port 8000 when run via `node main.js` — do not rely on nodemon/ts-node or a separate dev command. CORS must allow all origins either way.
+7. If the frontend is React, it MUST be a Vite app, not Create React App: package.json scripts are exactly {"dev":"vite","build":"vite build"}, deps include "vite" and "@vitejs/plugin-react" as devDependencies, entry point is frontend/index.html at the project root (not frontend/public/index.html) loading frontend/src/main.jsx, and `npm run build` outputs to frontend/dist. All backend calls from the frontend must use the full URL http://localhost:8000/... (no relative paths, no proxy).
+8. UI must look like a real shipped product, not a prototype — aim for the visual bar of a funded SaaS product's dashboard, not a form demo. Load Tailwind via `<script src="https://cdn.tailwindcss.com"></script>` in frontend/index.html and style every component with Tailwind utility classes — no unstyled default form elements, no bare black-on-white HTML. Also load a real typeface: `<link>` Google Fonts (e.g. Inter or a domain-appropriate pairing) in index.html and set it as the base font, don't leave it on the browser default. Use: a real color palette (not default blue links), card layouts with borders/shadows/rounded corners, consistent spacing, proper typography hierarchy, hover/focus/disabled states with smooth `transition` on every interactive element, a loading state while a request is in flight, an empty state when a list has zero items, and inline error messages on failure (not alert()). If React: use "lucide-react" for icons (add it as a dependency) instead of emoji or raw SVG — real icons read as more finished. If the domain has summarizable numbers (totals, counts, balances), show them as a row of stat cards at the top of the page, not buried in a list.
+9. Never emit LaTeX or math markup ($...$, \\rightarrow, \\times, etc.) anywhere in UI-facing text — browsers don't render it and it shows up as literal garbage. Use plain Unicode symbols instead (→, ×, ±) or plain words.
+10. Match the completeness of the architecture, not the minimum to compile: real client-side form validation with visible error messages, handle the actual edge cases implied by the domain (e.g. empty inputs, zero/negative amounts, duplicate names, division remainders when splitting), and give every list/table a populated, realistic empty state — not just a console.log and a TODO.
+11. When building a request body object, never use bare object-shorthand for a computed/renamed value (e.g. `{ ...data, split_with }` when the variable is actually named `splitWith`) — that's an undefined-variable crash. Always write the key explicitly: `{ ...data, split_with: splitWith }`. Error-state UI elements must use Tailwind's red palette (text-red-*, bg-red-*, or border-red-*) and only for genuine errors, never for other purposes.
+12. Imports are per-file, not global: when the frontend is split into multiple component files, every icon, hook, or helper a file's JSX actually references MUST be imported at the top of that exact file — importing it in App.jsx does not make it available in components/Whatever.jsx. Before finishing each component file, re-check every JSX tag and function call in it against that file's own import list.
+13. In backend/requirements.txt, never pin an exact version (==) for a Python package that has a compiled/Rust extension (pydantic, fastapi, uvicorn, sqlalchemy, pillow, cryptography, numpy, etc.) — an old exact pin may have no prebuilt wheel for whatever Python version actually runs it, forcing a from-source compile that fails. List these bare (no version) or with a minimum floor (>=), never ==, so pip picks whatever version has a prebuilt wheel.
 
 Return ONLY valid JSON:
 {"files":[{"path":"backend/main.py","content":"full file contents"}],"run_instructions":"markdown, exact commands"}
@@ -136,6 +148,10 @@ class RefineRequest(BaseModel):
 
 class CodeRequest(BaseModel):
     architecture: dict
+
+
+class RunRequest(BaseModel):
+    files: list
 
 
 class SaveRequest(BaseModel):
@@ -274,6 +290,176 @@ def _validate_file(path: str, content: str) -> dict:
     return {"path": path, "status": "skipped"}
 
 
+def _detect_backend_entry(files: list) -> tuple:
+    """Backend isn't always Python — the Coder can pick Node depending on the
+    architecture's stated tech. Detect which entrypoint got generated."""
+    paths = {f["path"] for f in files}
+    if "backend/main.py" in paths:
+        return "python", "main.py"
+    if "backend/main.js" in paths:
+        return "node", "main.js"
+    return None, None
+
+
+def _install_backend_deps(runtime: str, cwd: str, env: dict, timeout: int) -> dict:
+    """Returns {} on success, or {"status": "invalid"/"error", "error": ...} on failure."""
+    if runtime == "python":
+        deps_dir = os.path.join(cwd, "_deps")
+        req_path = os.path.join(cwd, "requirements.txt")
+        if os.path.exists(req_path):
+            try:
+                pip = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--quiet", "--target", deps_dir, "-r", req_path],
+                    capture_output=True, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return {"error": f"pip install timed out after {timeout}s"}
+            if pip.returncode != 0:
+                return {"error": f"pip install failed: {pip.stderr.strip()[-800:]}"}
+        env["PYTHONPATH"] = deps_dir + os.pathsep + env.get("PYTHONPATH", "")
+        return {}
+    if not shutil.which("npm"):
+        return {"error": "npm not found on this machine"}
+    try:
+        npm = subprocess.run(["npm", "install"], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"error": f"npm install timed out after {timeout}s"}
+    if npm.returncode != 0:
+        return {"error": f"npm install failed: {npm.stderr.strip()[:800]}"}
+    return {}
+
+
+def _boot_check_backend(files: list) -> dict:
+    """Tier 2: actually try to start the generated backend (Python or Node).
+    ponytail: runs as a plain subprocess on the host, not a container/microVM —
+    fine for a local single-user tool (you'd `pip install`/`npm install` this
+    yourself per Run Instructions anyway); get a real sandbox (Docker/
+    Firecracker) before this is ever exposed to untrusted specs or other
+    people's machines."""
+    backend_files = [f for f in files if f["path"].startswith("backend/")]
+    runtime, entry = _detect_backend_entry(backend_files)
+    if not entry:
+        return {"status": "skipped"}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for f in backend_files:
+            rel = f["path"][len("backend/"):]
+            full = os.path.join(tmp, rel)
+            os.makedirs(os.path.dirname(full) or tmp, exist_ok=True)
+            with open(full, "w") as fh:
+                fh.write(f["content"])
+
+        env = dict(os.environ)
+        install = _install_backend_deps(runtime, tmp, env, timeout=120)
+        if "error" in install:
+            return {"status": "invalid", "error": install["error"]}
+
+        cmd = [sys.executable, entry] if runtime == "python" else ["node", entry]
+        proc = subprocess.Popen(
+            cmd, cwd=tmp, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            _, stderr = proc.communicate(timeout=6)
+            # exited on its own within the window == crashed (a live server keeps running)
+            return {"status": "invalid", "error": f"Process exited immediately (code {proc.returncode}): {stderr.strip()[-800:]}"}
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return {"status": "valid"}
+
+
+def _run_frontend_smoke_test(frontend_url: str) -> dict:
+    """Tier 4: fills every visible input/textarea with a dummy value, clicks
+    the most likely submit button, and checks for (a) any console error or
+    uncaught JS exception, or (b) a Tailwind red-* error element appearing
+    afterward (relies on CODER_PROMPT rule 8's error-styling convention).
+    ponytail: a heuristic smoke test, not a real E2E suite — catches 'the
+    button doesn't actually work', not full user-flow coverage. Good enough
+    for the failure mode we've actually seen (a silently-caught frontend bug
+    that boot-checking the backend alone can't see)."""
+    from playwright.sync_api import sync_playwright
+
+    errors = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.on("console", lambda msg: errors.append(f"console.{msg.type}: {msg.text}") if msg.type == "error" else None)
+            page.on("pageerror", lambda exc: errors.append(f"uncaught exception: {exc}"))
+
+            page.goto(frontend_url, wait_until="networkidle", timeout=15000)
+
+            for el in page.locator("input, textarea").all():
+                try:
+                    input_type = (el.get_attribute("type") or "text").lower()
+                    if input_type in ("checkbox", "radio", "hidden", "file"):
+                        continue
+                    value = "1" if input_type == "number" else ("test@example.com" if input_type == "email" else "Test")
+                    el.fill(value)
+                except Exception:
+                    pass  # not fillable (e.g. disabled) -- not itself a bug
+
+            submit = page.locator(
+                "button[type=submit], button:has-text('Add'), button:has-text('Submit'), "
+                "button:has-text('Save'), button:has-text('Create')"
+            ).first
+            if submit.count() > 0:
+                submit.click()
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass  # request may still be genuinely slow, not necessarily a bug
+                page.wait_for_timeout(500)  # let React finish re-rendering after the response lands
+
+            red_error = page.locator("[class*='text-red-'], [class*='bg-red-'], [class*='border-red-']").first
+            if red_error.count() > 0 and red_error.is_visible():
+                errors.append(f"error state shown after submit: {red_error.inner_text()[:200]}")
+
+            browser.close()
+    except Exception as e:
+        errors.append(f"smoke test crashed: {e}")
+
+    if errors:
+        return {"status": "invalid", "error": "; ".join(errors)[:800]}
+    return {"status": "valid"}
+
+
+def _run_checks(files: list) -> tuple:
+    validations = [_validate_file(f["path"], f["content"]) for f in files]
+    if any(v["status"] == "invalid" for v in validations):
+        skipped = {"status": "skipped"}
+        return validations, skipped, skipped, [v for v in validations if v["status"] == "invalid"]
+
+    has_frontend = any(f["path"].startswith("frontend/") for f in files)
+    frontend_check = {"status": "skipped"}
+
+    if CURRENT_RUN is not None:
+        # An app is live via Run App on these same ports -- never tear it
+        # down just to run a background check. Skip rather than surprise-kill
+        # the user's active session.
+        boot_check = {"status": "skipped"}
+    elif has_frontend:
+        started = _start_full_stack(files)
+        if not started["ok"]:
+            boot_check = {"status": "invalid", "error": started["error"]}
+        else:
+            boot_check = {"status": "valid"}
+            try:
+                frontend_check = _run_frontend_smoke_test(started["frontend_url"])
+            finally:
+                _teardown_full_stack(started)
+    else:
+        boot_check = _boot_check_backend(files)
+
+    failures = [v for v in validations if v["status"] == "invalid"]
+    if boot_check["status"] == "invalid":
+        failures.append({"path": "backend (boot)", "status": "invalid", "error": boot_check["error"]})
+    if frontend_check["status"] == "invalid":
+        failures.append({"path": "frontend (runtime)", "status": "invalid", "error": frontend_check["error"]})
+    return validations, boot_check, frontend_check, failures
+
+
 MAX_CODE_ATTEMPTS = 3
 
 
@@ -289,10 +475,9 @@ async def generate_code(req: CodeRequest):
     result = await run_in_threadpool(call_ollama, messages)
     attempts = 1
 
-    while attempts < MAX_CODE_ATTEMPTS:
-        validations = [_validate_file(f["path"], f["content"]) for f in result.get("files", [])]
-        failures = [v for v in validations if v["status"] == "invalid"]
-        if not failures:
+    while True:
+        validations, boot_check, frontend_check, failures = await run_in_threadpool(_run_checks, result.get("files", []))
+        if not failures or attempts >= MAX_CODE_ATTEMPTS:
             break
         error_summary = "\n".join(f"- {v['path']}: {v['error']}" for v in failures)
         messages = messages + [
@@ -305,9 +490,179 @@ async def generate_code(req: CodeRequest):
         result = await run_in_threadpool(call_ollama, messages)
         attempts += 1
 
-    result["validation"] = [_validate_file(f["path"], f["content"]) for f in result.get("files", [])]
+    result["validation"] = validations
+    result["boot_check"] = boot_check
+    result["frontend_check"] = frontend_check
     result["attempts"] = attempts
     return result
+
+
+# ── Live run (Tier 3): keep the generated app running and serve its UI ────────
+# ponytail: one global run, not a per-user registry — this is a local single-
+# user tool, not a hosted multi-tenant service. Plain subprocesses on the host,
+# no container. Upgrade both if this ever needs concurrent runs or isolation.
+
+RUN_BACKEND_PORT = 8000
+RUN_FRONTEND_PORT = 8001
+CURRENT_RUN = None
+
+
+def _wait_for_port(port: int, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return True
+        except OSError:
+            time.sleep(0.3)
+    return False
+
+
+def _stop_current_run():
+    global CURRENT_RUN
+    if CURRENT_RUN is None:
+        return
+    for key in ("backend_proc", "static_proc"):
+        proc = CURRENT_RUN.get(key)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    tmp_dir = CURRENT_RUN.get("tmp_dir")
+    if tmp_dir:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    CURRENT_RUN = None
+
+
+atexit.register(_stop_current_run)
+
+
+def _start_full_stack(files: list) -> dict:
+    """Boots backend + builds/serves frontend. Caller owns teardown (via
+    _teardown_full_stack) once done — this only starts things and never
+    leaves a partial start running (cleans up on any failure)."""
+    tmp = tempfile.mkdtemp(prefix="specforge_run_")
+    for f in files:
+        full = os.path.join(tmp, f["path"])
+        os.makedirs(os.path.dirname(full) or tmp, exist_ok=True)
+        with open(full, "w") as fh:
+            fh.write(f["content"])
+
+    backend_dir = os.path.join(tmp, "backend")
+    frontend_dir = os.path.join(tmp, "frontend")
+
+    backend_files = [f for f in files if f["path"].startswith("backend/")]
+    runtime, entry = _detect_backend_entry(backend_files)
+    if not entry:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": "No backend/main.py or backend/main.js in generated files"}
+    if not os.path.isdir(frontend_dir):
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": "No frontend/ in generated files"}
+
+    env = dict(os.environ)
+    install = _install_backend_deps(runtime, backend_dir, env, timeout=180)
+    if "error" in install:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": f"Backend dependency install failed: {install['error']}"}
+
+    backend_cmd = [sys.executable, entry] if runtime == "python" else ["node", entry]
+    backend_proc = subprocess.Popen(
+        backend_cmd, cwd=backend_dir, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if not _wait_for_port(RUN_BACKEND_PORT, timeout=15):
+        backend_proc.kill()
+        _, stderr = backend_proc.communicate()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": f"Backend did not start on port {RUN_BACKEND_PORT}: {stderr.strip()[-800:]}"}
+
+    if not shutil.which("npm"):
+        backend_proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": "npm not found on this machine"}
+
+    try:
+        npm_install = subprocess.run(["npm", "install"], cwd=frontend_dir, capture_output=True, text=True, timeout=240)
+    except subprocess.TimeoutExpired:
+        backend_proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": "npm install timed out after 240s"}
+    if npm_install.returncode != 0:
+        backend_proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": f"npm install failed: {npm_install.stderr.strip()[:800]}"}
+
+    try:
+        npm_build = subprocess.run(["npm", "run", "build"], cwd=frontend_dir, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        backend_proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": "npm run build timed out after 180s"}
+
+    dist_dir = os.path.join(frontend_dir, "dist")
+    if npm_build.returncode != 0 or not os.path.isdir(dist_dir):
+        alt = os.path.join(frontend_dir, "build")  # in case the model ignored rule 7 and built a CRA app
+        if os.path.isdir(alt):
+            dist_dir = alt
+        else:
+            backend_proc.kill()
+            shutil.rmtree(tmp, ignore_errors=True)
+            # esbuild/rollup put the actual "file:line: error" near the top of
+            # stderr, not the tail (which is just the bundler's own stack trace)
+            return {"ok": False, "error": f"npm run build failed: {npm_build.stderr.strip()[:1200]}"}
+
+    static_proc = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(RUN_FRONTEND_PORT), "--directory", dist_dir],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if not _wait_for_port(RUN_FRONTEND_PORT, timeout=10):
+        backend_proc.kill()
+        static_proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": "Static file server for the frontend failed to start"}
+
+    return {
+        "ok": True, "tmp": tmp, "backend_proc": backend_proc, "static_proc": static_proc,
+        "backend_url": f"http://localhost:{RUN_BACKEND_PORT}",
+        "frontend_url": f"http://localhost:{RUN_FRONTEND_PORT}",
+    }
+
+
+def _teardown_full_stack(started: dict):
+    for key in ("backend_proc", "static_proc"):
+        proc = started.get(key)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    if started.get("tmp"):
+        shutil.rmtree(started["tmp"], ignore_errors=True)
+
+
+def _run_stack(files: list) -> dict:
+    global CURRENT_RUN
+    _stop_current_run()
+    started = _start_full_stack(files)
+    if not started["ok"]:
+        return {"status": "error", "error": started["error"]}
+    CURRENT_RUN = {"tmp_dir": started["tmp"], "backend_proc": started["backend_proc"], "static_proc": started["static_proc"]}
+    return {"status": "running", "backend_url": started["backend_url"], "frontend_url": started["frontend_url"]}
+
+
+@app.post("/api/code/run")
+async def run_code(req: RunRequest):
+    return await run_in_threadpool(_run_stack, req.files)
+
+
+@app.post("/api/code/stop")
+async def stop_code():
+    await run_in_threadpool(_stop_current_run)
+    return {"status": "stopped"}
 
 
 # ── File extraction helpers ───────────────────────────────────────────────────

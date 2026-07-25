@@ -956,29 +956,50 @@ function HamburgerSidebar({onLoad,theme,onToggleTheme}){
 }
 
 function CodeView({arch}){
-  const [state,setState]=useState({loading:false,files:null,instructions:"",error:null,validation:[],attempts:1});
+  const [state,setState]=useState({loading:false,files:null,instructions:"",error:null,validation:[],attempts:1,bootCheck:null,frontendCheck:null});
   const [selected,setSelected]=useState(0);
+  const [run,setRun]=useState({status:"idle",backendUrl:null,frontendUrl:null,error:null}); // idle | starting | running | error
 
   async function generate(){
-    setState({loading:true,files:null,instructions:"",error:null,validation:[],attempts:1});
+    setState({loading:true,files:null,instructions:"",error:null,validation:[],attempts:1,bootCheck:null,frontendCheck:null});
     try{
       const res=await fetch("/api/code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({architecture:arch})});
       const data=await res.json();
       if(!res.ok)throw new Error(data.detail||"Code generation failed");
-      setState({loading:false,files:data.files||[],instructions:data.run_instructions||"",error:null,validation:data.validation||[],attempts:data.attempts||1});
+      setState({loading:false,files:data.files||[],instructions:data.run_instructions||"",error:null,validation:data.validation||[],attempts:data.attempts||1,bootCheck:data.boot_check||null,frontendCheck:data.frontend_check||null});
       setSelected(0);
     }catch(e){
-      setState({loading:false,files:null,instructions:"",error:e.message||"Code generation failed.",validation:[],attempts:1});
+      setState({loading:false,files:null,instructions:"",error:e.message||"Code generation failed.",validation:[],attempts:1,bootCheck:null,frontendCheck:null});
     }
   }
 
   useEffect(()=>{ if(!state.files&&!state.loading&&!state.error) generate(); },[]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(()=>()=>{ fetch("/api/code/stop",{method:"POST",keepalive:true}).catch(()=>{}); },[]); // stop any live preview when leaving this tab
+
+  async function runApp(){
+    setRun({status:"starting",backendUrl:null,frontendUrl:null,error:null});
+    try{
+      const res=await fetch("/api/code/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({files:state.files})});
+      const data=await res.json();
+      if(!res.ok||data.status!=="running")throw new Error(data.error||data.detail||"Failed to run the app");
+      setRun({status:"running",backendUrl:data.backend_url,frontendUrl:data.frontend_url,error:null});
+    }catch(e){
+      setRun({status:"error",backendUrl:null,frontendUrl:null,error:e.message||"Failed to run the app"});
+    }
+  }
+
+  async function stopApp(){
+    setRun({status:"idle",backendUrl:null,frontendUrl:null,error:null});
+    try{ await fetch("/api/code/stop",{method:"POST"}); }catch{}
+  }
 
   if(state.loading){
     return(
       <div className="diagram-wrap" style={{padding:"48px 0",textAlign:"center",color:"var(--color-text-tertiary)"}}>
         <i className="ti ti-loader" style={{fontSize:22,animation:"spin 1s linear infinite"}}/>
         <p style={{marginTop:10,fontSize:13,fontFamily:"var(--font-sans)"}}>Generating code scaffold…</p>
+        <p style={{marginTop:4,fontSize:11.5,fontFamily:"var(--font-sans)"}}>Installing dependencies, boot-testing the backend, and smoke-testing the UI in a headless browser — can take a few minutes.</p>
       </div>
     );
   }
@@ -998,10 +1019,55 @@ function CodeView({arch}){
 
   return(
     <div className="diagram-wrap" style={{padding:0}}>
-      {state.attempts>1&&(
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:14,margin:"0 0 8px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:14,fontSize:11.5,fontFamily:"var(--font-sans)"}}>
+          {state.attempts>1&&(
+            <span style={{color:"var(--color-text-tertiary)"}}>
+              <i className="ti ti-refresh" aria-hidden="true"/> Regenerated {state.attempts}× to fix validation errors
+            </span>
+          )}
+          {state.bootCheck&&state.bootCheck.status==="valid"&&(
+            <span style={{color:"var(--color-accent-green,#4ade80)"}}>
+              <i className="ti ti-circle-check" aria-hidden="true"/> Backend boots successfully
+            </span>
+          )}
+          {state.bootCheck&&state.bootCheck.status==="invalid"&&(
+            <span style={{color:"var(--color-accent-red,#f87171)"}} title={state.bootCheck.error}>
+              <i className="ti ti-circle-x" aria-hidden="true"/> Setup failed — hover for details
+            </span>
+          )}
+          {state.frontendCheck&&state.frontendCheck.status==="valid"&&(
+            <span style={{color:"var(--color-accent-green,#4ade80)"}}>
+              <i className="ti ti-circle-check" aria-hidden="true"/> Frontend passed smoke test
+            </span>
+          )}
+          {state.frontendCheck&&state.frontendCheck.status==="invalid"&&(
+            <span style={{color:"var(--color-accent-red,#f87171)"}} title={state.frontendCheck.error}>
+              <i className="ti ti-circle-x" aria-hidden="true"/> Frontend failed smoke test
+            </span>
+          )}
+        </div>
+        {run.status==="idle"&&<button className="json-btn" onClick={runApp}><i className="ti ti-player-play" aria-hidden="true"/> Run App</button>}
+        {run.status==="starting"&&<button className="json-btn" disabled><i className="ti ti-loader" style={{animation:"spin 1s linear infinite"}} aria-hidden="true"/> Starting…</button>}
+        {run.status==="running"&&<button className="json-btn" onClick={stopApp}><i className="ti ti-player-stop" aria-hidden="true"/> Stop App</button>}
+        {run.status==="error"&&<button className="json-btn" onClick={runApp}><i className="ti ti-refresh" aria-hidden="true"/> Retry Run</button>}
+      </div>
+      {run.status==="starting"&&(
         <p style={{fontSize:11.5,color:"var(--color-text-tertiary)",fontFamily:"var(--font-sans)",margin:"0 0 8px"}}>
-          <i className="ti ti-refresh" aria-hidden="true"/> Regenerated {state.attempts}× to fix validation errors
+          Installing frontend deps and building — can take a couple minutes on the first run.
         </p>
+      )}
+      {run.status==="error"&&(
+        <p className="error-msg" style={{margin:"0 0 8px"}}><i className="ti ti-alert-triangle" aria-hidden="true"/> {run.error}</p>
+      )}
+      {run.status==="running"&&(
+        <div style={{marginBottom:12}}>
+          <p style={{fontSize:11.5,color:"var(--color-text-tertiary)",fontFamily:"var(--font-sans)",margin:"0 0 6px"}}>
+            Live preview — frontend at <code>{run.frontendUrl}</code>, backend at <code>{run.backendUrl}</code>
+          </p>
+          <iframe src={run.frontendUrl} title="Live app preview"
+            style={{width:"100%",height:"70vh",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",background:"#fff"}}/>
+        </div>
       )}
       <div style={{display:"flex",height:"85vh",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",overflow:"hidden"}}>
         <div style={{width:240,flexShrink:0,borderRight:"0.5px solid var(--color-border-secondary)",overflowY:"auto",background:"var(--color-background-primary)"}}>

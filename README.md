@@ -1,10 +1,10 @@
-# SpecForge — Phase 1: Architect Agent
+# SpecForge — Architect + Coder Agents (Phase 1 & 2)
 
-> Plain English product spec in. Layered system architecture diagram out.
+> Plain English product spec in. A working, boot-tested full-stack app out.
 
 SpecForge is an agentic engineering tool built around Andrej Karpathy's framing from AI Ascent 2026: the spec is the program, and the engineer's job is increasingly to write *intent* rather than *implementation*.
 
-Phase 1 is the Architect Agent. You describe what you want to build. The agent parses your intent, structures it into layers, picks a concrete tech stack, and returns an interactive flow diagram you can inspect or hand off to the next agent in the chain.
+Phase 1 is the Architect Agent: you describe what you want to build, it structures your intent into layers, picks a concrete tech stack, and returns an interactive flow diagram. Phase 2 is the Coder Agent: it turns that architecture into a real, runnable full-stack scaffold — validated, boot-tested, and smoke-tested in a headless browser before you ever see it, with a live in-browser preview of the actual running app.
 
 ---
 
@@ -25,6 +25,21 @@ Type a plain-English product idea or upload context documents (PDFs, Word docs, 
 
 ---
 
+## Coder Agent (Phase 2)
+
+Once you have an architecture, hit the **Code** tab. The Coder agent turns the architecture JSON into a real full-stack scaffold and runs it through four validation tiers before showing it to you, auto-retrying up to 3 times if something fails:
+
+1. **Syntax validation** — `ast.parse` for Python, `json.loads` for JSON, `node --check` for plain JS
+2. **Backend boot-check** — installs dependencies and actually starts the generated backend (Python or Node) in an isolated temp dir
+3. **Live run** — click **Run App** to install + build the real frontend and boot the real backend together, embedded live in an iframe right inside SpecForge (backend on :8000, frontend on :8001)
+4. **Frontend smoke test** — a headless Playwright browser fills every form field, submits, and checks for console errors, uncaught exceptions, or a red-styled error state, catching bugs that pass syntax checks but crash at runtime
+
+Generated UIs use Tailwind (CDN), Google Fonts, and lucide-react icons, decomposed into real component files instead of one giant `App.jsx` — aiming for shipped-product polish, not a form demo.
+
+> **Known limits:** 3 retry attempts isn't a guarantee — some generations still fail and need a manual **Regenerate**. This is a local single-user tool: generated apps run as plain subprocesses on your machine, not in a sandboxed container.
+
+---
+
 ## Stack
 
 | Layer | Tech |
@@ -37,6 +52,8 @@ Type a plain-English product idea or upload context documents (PDFs, Word docs, 
 | Icons | Tabler Icons webfont (CDN) |
 | Diagram | Custom React SVG renderer (no external lib) |
 | Animation | CSS keyframes + React state machine |
+| Code validation | `ast` / `node --check` (syntax) · Playwright + headless Chromium (runtime smoke test) |
+| Generated app UI | Tailwind CSS (CDN) · lucide-react · Google Fonts |
 
 ---
 
@@ -52,13 +69,14 @@ cd backend
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+playwright install chromium     # needed for the Coder agent's frontend smoke test
 
 # 3. Add your Ollama API key
 echo "OLLAMA_API_KEY=your_key_here" > .env
 
-# 4. Start backend
-uvicorn main:app --reload
-# → http://localhost:8000
+# 4. Start backend (port 8002 — matches the frontend's dev proxy)
+uvicorn main:app --reload --port 8002
+# → http://localhost:8002
 
 # 5. Frontend (new terminal)
 cd ../frontend
@@ -82,10 +100,34 @@ Gemma returns JSON: layers, components, tech choices, connections, key_flows, sa
         ↓
 React renders 3 interactive views: Diagram / Cards / Animate
         ↓
-JSON output feeds Phase 2 (Coder Agent) — coming next
+JSON output feeds the Coder Agent (Phase 2) to generate real code
 ```
 
 The system prompt forces the model to think like a senior architect: concrete tech names, explicit layer-to-layer connections, 4–6 layers, a mandatory `User Experience` entry point, and a complete round-trip flow back to `response_view`.
+
+---
+
+## Coder Agent — How It Works
+
+```
+Architecture JSON → POST /api/code
+        ↓
+Gemma generates a full-stack scaffold (backend + frontend files)
+        ↓
+Tier 1: syntax-validate every file
+        ↓
+Tier 2: install deps, boot the generated backend for real
+        ↓
+Tier 4: headless Playwright fills the UI, submits, checks for errors
+        ↓
+Any failure → the specific error is fed back to Gemma → retry (max 3x)
+        ↓
+Files + validation results + run instructions returned to the UI
+        ↓
+Click "Run App" (Tier 3) → backend + built frontend run live, embedded in an iframe
+```
+
+Backend and frontend always run on fixed ports (8000 / 8001) so the generated frontend's hardcoded API calls just work — only one live run at a time, and starting a new one stops whatever's running first.
 
 ---
 
@@ -121,17 +163,18 @@ The frontend parses this on `→ Step N:` boundaries into individual steps. Each
 ```
 specforge/
 ├── backend/
-│   ├── main.py              # FastAPI app, Ollama API proxy, system prompt
+│   ├── main.py              # FastAPI app: Architect + Coder agents, code validation/run pipeline
+│   ├── test_*.py            # Manual smoke-test scripts (no framework) for the validation pipeline
 │   ├── .env                 # OLLAMA_API_KEY (gitignored)
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx          # Full UI: Diagram, Cards, Animate views + StepScene
+│   │   ├── App.jsx          # Full UI: Diagram, Cards, Animate, Code views + StepScene + live run
 │   │   ├── main.jsx         # React entry
 │   │   └── index.css        # Design tokens, animations, component styles
 │   ├── index.html           # Tabler Icons CDN + Google Fonts
 │   ├── package.json
-│   └── vite.config.js       # Dev proxy: /api → localhost:8000
+│   └── vite.config.js       # Dev proxy: /api → localhost:8002
 ├── .gitignore
 └── README.md
 ```
@@ -179,13 +222,13 @@ specforge/
 
 ## Roadmap
 
-This is Phase 1 of a 4-phase agentic engineering system. The output of each phase is the input spec for the next agent.
+This is a 4-phase agentic engineering system. The output of each phase is the input spec for the next agent.
 
 | Phase | Agent | What it does | Status |
 |-------|-------|--------------|--------|
 | **1** | **Architect** | spec → layered architecture diagram | ✅ Done |
-| 2 | Coder | architecture JSON → working full-stack code | 🔜 Next |
-| 3 | Tester | generated code → automated test suite | 🔜 Planned |
+| **2** | **Coder** | architecture JSON → validated, boot-tested, live-runnable full-stack code | ✅ Done |
+| 3 | Tester | generated code → automated test suite | 🔜 Next |
 | 4 | Red-Team | deployed app → security probe + vulnerability report | 🔜 Planned |
 
 The end state: you write a plain English spec, four agents in sequence build, test, deploy, and harden the software. No manual coding required.
