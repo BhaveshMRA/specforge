@@ -1,12 +1,21 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
+import urllib.request
+import urllib.error
 import json
 import os
 import io
 import base64
 import re
+import ast
+import shutil
+import subprocess
+import tempfile
 from dotenv import load_dotenv
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -40,7 +49,11 @@ app = FastAPI(title="SpecForge API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:8002",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,6 +107,20 @@ Return ONLY valid JSON in this exact schema:
 
 If the type is 'architecture', you must preserve the existing architecture structure as much as possible, applying ONLY the requested changes, and updating key_flows/sample_query appropriately. Do not output markdown, just the raw JSON object."""
 
+CODER_PROMPT = """You are a senior full-stack engineer. You receive a system architecture JSON (layers, components, tech choices, connections) produced by an Architect agent, and you generate a minimal, runnable scaffold that implements it.
+
+CRITICAL RULES:
+1. Map each component's "tech" field to a real, working implementation — no placeholders, no TODOs, no lorem ipsum.
+2. Keep it lean: one clear entry point per side (e.g. backend/main.py, frontend/src/App.jsx), plus only the extra files strictly needed (models, one route file, minimal styling). 6-14 files total.
+3. Prefer boring, standard choices consistent with the component's stated tech (e.g. "PostgreSQL" -> SQLAlchemy models + schema; "React" -> a working App.jsx that calls the backend). If a tech name is vague, pick the most common concrete implementation.
+4. Code must actually run together: consistent imports, matching route paths between frontend fetch calls and backend routes, a requirements.txt / package.json listing exactly the dependencies used.
+5. Include run_instructions: the exact shell commands to install and start it.
+
+Return ONLY valid JSON:
+{"files":[{"path":"backend/main.py","content":"full file contents"}],"run_instructions":"markdown, exact commands"}
+
+No explanation, no markdown fences, just the raw JSON object."""
+
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
@@ -105,6 +132,10 @@ class RefineRequest(BaseModel):
     existing_arch: dict
     feedback: str
     chat_history: list = []
+
+
+class CodeRequest(BaseModel):
+    architecture: dict
 
 
 class SaveRequest(BaseModel):
@@ -122,29 +153,48 @@ def get_db():
         db.close()
 
 
-async def call_ollama(messages: list) -> dict:
+def call_ollama(messages: list, _retries: int = 2) -> dict:
+    """Call the Ollama cloud API using stdlib urllib (no timeout — model generates full JSON before sending)."""
     if not OLLAMA_API_KEY:
         raise HTTPException(status_code=500, detail="OLLAMA_API_KEY not set in .env")
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-        response = await client.post(
-            "https://ollama.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OLLAMA_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={"model": "gemma4:31b-cloud", "messages": messages, "temperature": 0.3},
-        )
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code,
-                            detail=f"Ollama API error: {response.text}")
-    raw = response.json()["choices"][0]["message"]["content"]
+
+    payload = json.dumps(
+        {"model": "gemma4:31b-cloud", "messages": messages, "temperature": 0.3}
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://ollama.com/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {OLLAMA_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req) as resp:   # no timeout — let the model finish
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=e.code, detail=f"Ollama API error: {detail}")
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Ollama API: {e.reason}")
+
+    data = json.loads(body)
+    raw = data["choices"][0]["message"]["content"]
     cleaned = raw.replace("```json", "").replace("```", "").strip()
     # Sanitize invalid \u escapes (e.g. \u followed by non-hex or end of string)
     cleaned = re.sub(r'\\u(?![0-9a-fA-F]{4})', r'\\\\u', cleaned)
     try:
-        return json.loads(cleaned)
+        return json.loads(cleaned, strict=False)
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse JSON: {e}\n\nRaw text: {cleaned}")
+        # ponytail: the model occasionally emits structurally malformed JSON
+        # (e.g. a stray unescaped quote in generated code). Retrying regenerates
+        # the whole response rather than attempting to repair broken JSON.
+        if _retries > 0:
+            return call_ollama(messages, _retries=_retries - 1)
+        raise HTTPException(status_code=500, detail=f"Failed to parse JSON after retries: {e}\n\nRaw text: {cleaned}")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -156,7 +206,7 @@ async def health():
 
 @app.post("/api/architect")
 async def architect(req: SpecRequest):
-    return await call_ollama([
+    return await run_in_threadpool(call_ollama, [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Architect this: {req.spec}"},
     ])
@@ -164,7 +214,7 @@ async def architect(req: SpecRequest):
 
 @app.post("/api/refine")
 async def refine(req: RefineRequest):
-    return await call_ollama([
+    return await run_in_threadpool(call_ollama, [
         {"role": "system", "content": REFINE_PROMPT},
         {"role": "user", "content": (
             f"Existing architecture:\n{json.dumps(req.existing_arch, indent=2)}\n\n"
@@ -179,7 +229,7 @@ async def reason(req: RefineRequest):
     if req.chat_history:
         history_str = "Chat History:\n" + "\n".join([f"{msg['role']}: {msg['message']}" for msg in req.chat_history]) + "\n\n"
         
-    return await call_ollama([
+    return await run_in_threadpool(call_ollama, [
         {"role": "system", "content": REASON_PROMPT},
         {"role": "user", "content": (
             f"Existing architecture:\n{json.dumps(req.existing_arch, indent=2)}\n\n"
@@ -187,6 +237,77 @@ async def reason(req: RefineRequest):
             f"Engineer's prompt: {req.feedback}"
         )},
     ])
+
+
+def _validate_file(path: str, content: str) -> dict:
+    """Deterministic syntax check only — catches 'won't parse', not 'is wrong'.
+    JSX/TS are skipped: node's --check can't parse JSX/TS without a transformer,
+    and adding babel/tsc just for validation isn't worth the dependency."""
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".py":
+        try:
+            ast.parse(content)
+            return {"path": path, "status": "valid"}
+        except SyntaxError as e:
+            return {"path": path, "status": "invalid", "error": f"SyntaxError: {e.msg} at line {e.lineno}"}
+
+    if ext == ".json":
+        try:
+            json.loads(content)
+            return {"path": path, "status": "valid"}
+        except json.JSONDecodeError as e:
+            return {"path": path, "status": "invalid", "error": f"JSONDecodeError: {e}"}
+
+    if ext == ".js" and shutil.which("node"):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+        try:
+            result = subprocess.run(["node", "--check", tmp_path], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return {"path": path, "status": "valid"}
+            return {"path": path, "status": "invalid", "error": result.stderr.strip()[:500]}
+        finally:
+            os.unlink(tmp_path)
+
+    return {"path": path, "status": "skipped"}
+
+
+MAX_CODE_ATTEMPTS = 3
+
+
+@app.post("/api/code")
+async def generate_code(req: CodeRequest):
+    messages = [
+        {"role": "system", "content": CODER_PROMPT},
+        {"role": "user", "content": (
+            f"Architecture:\n{json.dumps(req.architecture, indent=2)}\n\nGenerate the code scaffold."
+        )},
+    ]
+
+    result = await run_in_threadpool(call_ollama, messages)
+    attempts = 1
+
+    while attempts < MAX_CODE_ATTEMPTS:
+        validations = [_validate_file(f["path"], f["content"]) for f in result.get("files", [])]
+        failures = [v for v in validations if v["status"] == "invalid"]
+        if not failures:
+            break
+        error_summary = "\n".join(f"- {v['path']}: {v['error']}" for v in failures)
+        messages = messages + [
+            {"role": "assistant", "content": json.dumps(result)},
+            {"role": "user", "content": (
+                f"These files failed validation:\n{error_summary}\n\n"
+                "Return the complete corrected files JSON again in the same schema, fixing only these issues."
+            )},
+        ]
+        result = await run_in_threadpool(call_ollama, messages)
+        attempts += 1
+
+    result["validation"] = [_validate_file(f["path"], f["content"]) for f in result.get("files", [])]
+    result["attempts"] = attempts
+    return result
 
 
 # ── File extraction helpers ───────────────────────────────────────────────────
@@ -361,3 +482,10 @@ def delete_save(save_id: str, db: Session = Depends(get_db)):
     db.delete(save)
     db.commit()
 
+
+# ── Serve built React frontend ─────────────────────────────────────────────────
+
+FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "dist")
+
+if os.path.isdir(FRONTEND_DIST):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

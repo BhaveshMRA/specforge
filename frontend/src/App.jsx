@@ -955,6 +955,100 @@ function HamburgerSidebar({onLoad,theme,onToggleTheme}){
   );
 }
 
+function CodeView({arch}){
+  const [state,setState]=useState({loading:false,files:null,instructions:"",error:null,validation:[],attempts:1});
+  const [selected,setSelected]=useState(0);
+
+  async function generate(){
+    setState({loading:true,files:null,instructions:"",error:null,validation:[],attempts:1});
+    try{
+      const res=await fetch("/api/code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({architecture:arch})});
+      const data=await res.json();
+      if(!res.ok)throw new Error(data.detail||"Code generation failed");
+      setState({loading:false,files:data.files||[],instructions:data.run_instructions||"",error:null,validation:data.validation||[],attempts:data.attempts||1});
+      setSelected(0);
+    }catch(e){
+      setState({loading:false,files:null,instructions:"",error:e.message||"Code generation failed.",validation:[],attempts:1});
+    }
+  }
+
+  useEffect(()=>{ if(!state.files&&!state.loading&&!state.error) generate(); },[]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if(state.loading){
+    return(
+      <div className="diagram-wrap" style={{padding:"48px 0",textAlign:"center",color:"var(--color-text-tertiary)"}}>
+        <i className="ti ti-loader" style={{fontSize:22,animation:"spin 1s linear infinite"}}/>
+        <p style={{marginTop:10,fontSize:13,fontFamily:"var(--font-sans)"}}>Generating code scaffold…</p>
+      </div>
+    );
+  }
+
+  if(state.error){
+    return(
+      <div className="diagram-wrap" style={{padding:24}}>
+        <p className="error-msg"><i className="ti ti-alert-triangle" aria-hidden="true"/> {state.error}</p>
+        <button className="json-btn" onClick={generate}><i className="ti ti-refresh"/> Retry</button>
+      </div>
+    );
+  }
+
+  if(!state.files||!state.files.length) return null;
+
+  const validationByPath=Object.fromEntries((state.validation||[]).map(v=>[v.path,v]));
+
+  return(
+    <div className="diagram-wrap" style={{padding:0}}>
+      {state.attempts>1&&(
+        <p style={{fontSize:11.5,color:"var(--color-text-tertiary)",fontFamily:"var(--font-sans)",margin:"0 0 8px"}}>
+          <i className="ti ti-refresh" aria-hidden="true"/> Regenerated {state.attempts}× to fix validation errors
+        </p>
+      )}
+      <div style={{display:"flex",height:"85vh",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",overflow:"hidden"}}>
+        <div style={{width:240,flexShrink:0,borderRight:"0.5px solid var(--color-border-secondary)",overflowY:"auto",background:"var(--color-background-primary)"}}>
+          {state.files.map((f,i)=>{
+            const v=validationByPath[f.path];
+            return(
+              <div key={f.path||i} onClick={()=>setSelected(i)} title={v&&v.status==="invalid"?v.error:undefined}
+                style={{
+                  display:"flex",alignItems:"center",gap:6,
+                  padding:"7px 10px",fontSize:11.5,fontFamily:"var(--font-mono)",cursor:"pointer",
+                  background:i===selected?"var(--color-background-secondary)":"transparent",
+                  color:i===selected?"var(--color-text-primary)":"var(--color-text-tertiary)",
+                }}>
+                <i className="ti ti-file-text" style={{fontSize:12,flexShrink:0}} aria-hidden="true"/>
+                <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{f.path}</span>
+                {v&&v.status==="valid"&&<i className="ti ti-circle-check" style={{color:"var(--color-accent-green,#4ade80)",fontSize:13,flexShrink:0}} aria-hidden="true"/>}
+                {v&&v.status==="invalid"&&<i className="ti ti-circle-x" style={{color:"var(--color-accent-red,#f87171)",fontSize:13,flexShrink:0}} aria-hidden="true"/>}
+              </div>
+            );
+          })}
+          <div style={{padding:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+            <button className="json-btn" onClick={generate} style={{width:"100%",justifyContent:"center"}}>
+              <i className="ti ti-refresh" aria-hidden="true"/> Regenerate
+            </button>
+          </div>
+        </div>
+        <pre style={{
+          margin:0,flex:1,overflow:"auto",background:"var(--color-background-secondary)",
+          color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)",
+          fontSize:13,lineHeight:1.6,padding:"16px 20px",whiteSpace:"pre",maxHeight:"none",
+        }}>
+          {state.files[selected]?.content}
+        </pre>
+      </div>
+      {state.instructions&&(
+        <div className="flows-section" style={{marginTop:12}}>
+          <div className="flows-header">
+            <i className="ti ti-terminal-2" aria-hidden="true"/>
+            <span>Run instructions</span>
+          </div>
+          <pre className="json-block" style={{margin:0}}>{state.instructions}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ArchDiagram({arch,onRefine,checkpoints,onCheckpoint,onLoadCheckpoint,activeSaveId,onSaveComplete}){
   const [view,setView]=useState("diagram");
   const [showJSON,setShowJSON]=useState(false);
@@ -982,6 +1076,7 @@ function ArchDiagram({arch,onRefine,checkpoints,onCheckpoint,onLoadCheckpoint,ac
                 ["diagram","ti-topology-star-2","Diagram"],
                 ["cards","ti-layout-rows","Cards"],
                 ["animate","ti-player-play","Animate"],
+                ["code","ti-terminal-2","Code"],
               ].map(([v,ic,label])=>(
                 <button key={v} onClick={()=>setView(v)} className={"toggle-btn"+(view===v?" active":"")}>
                   <i className={"ti "+ic} aria-hidden="true"/>{label}
@@ -1022,7 +1117,13 @@ function ArchDiagram({arch,onRefine,checkpoints,onCheckpoint,onLoadCheckpoint,ac
         </div>
       )}
 
-      {view!=="animate"&&(arch.key_flows||[]).length>0&&(
+      {view==="code"&&(
+        <div className="fade-up">
+          <CodeView arch={arch}/>
+        </div>
+      )}
+
+      {view!=="animate"&&view!=="code"&&(arch.key_flows||[]).length>0&&(
         <div className="flows-section" style={{animationDelay:flowDelay+"s"}}>
           <div className="flows-header">
             <i className="ti ti-route" aria-hidden="true"/>
