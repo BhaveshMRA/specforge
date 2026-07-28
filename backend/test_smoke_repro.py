@@ -64,6 +64,7 @@ INDEX_HTML = """<!doctype html>
 
 files = [
     {"path": "backend/main.py", "content": BACKEND_MAIN},
+    {"path": "backend/requirements.txt", "content": "fastapi\nuvicorn\npydantic\n"},
     {"path": "frontend/package.json", "content": FRONTEND_PACKAGE_JSON},
     {"path": "frontend/index.html", "content": INDEX_HTML},
 ]

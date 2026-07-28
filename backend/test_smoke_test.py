@@ -55,6 +55,7 @@ WORKING_INDEX_HTML = BUGGY_INDEX_HTML.replace(
 def _files(index_html):
     return [
         {"path": "backend/main.py", "content": BACKEND_MAIN},
+        {"path": "backend/requirements.txt", "content": "fastapi\nuvicorn\n"},
         {"path": "frontend/package.json", "content": FRONTEND_PACKAGE_JSON},
         {"path": "frontend/index.html", "content": index_html},
     ]

@@ -27,6 +27,7 @@ FRONTEND_INDEX_HTML = "<!doctype html><html><body><h1>hello from generated app</
 
 FILES = [
     {"path": "backend/main.py", "content": BACKEND_MAIN},
+    {"path": "backend/requirements.txt", "content": "fastapi\nuvicorn\n"},
     {"path": "frontend/package.json", "content": FRONTEND_PACKAGE_JSON},
     {"path": "frontend/index.html", "content": FRONTEND_INDEX_HTML},
 ]

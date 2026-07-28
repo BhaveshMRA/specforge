@@ -1,5 +1,7 @@
 from main import _boot_check_backend
 
+REQUIREMENTS_TXT = "fastapi\nuvicorn\n"
+
 WORKING_MAIN = """
 from fastapi import FastAPI
 app = FastAPI()
@@ -30,10 +32,16 @@ throw new Error("boom");
 
 
 def test():
-    ok = _boot_check_backend([{"path": "backend/main.py", "content": WORKING_MAIN}])
+    ok = _boot_check_backend([
+        {"path": "backend/main.py", "content": WORKING_MAIN},
+        {"path": "backend/requirements.txt", "content": REQUIREMENTS_TXT},
+    ])
     assert ok["status"] == "valid", ok
 
-    bad = _boot_check_backend([{"path": "backend/main.py", "content": CRASHING_MAIN}])
+    bad = _boot_check_backend([
+        {"path": "backend/main.py", "content": CRASHING_MAIN},
+        {"path": "backend/requirements.txt", "content": REQUIREMENTS_TXT},
+    ])
     assert bad["status"] == "invalid", bad
     assert "this_module_does_not_exist" in bad["error"], bad
 

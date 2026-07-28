@@ -18,6 +18,7 @@ Type a plain-English product idea or upload context documents (PDFs, Word docs, 
 - **Reason Architecture 🧠** — An embedded conversational AI assistant lets you chat about your architecture contextually. Ask it questions (e.g. "Where is the database?") and it will answer conversationally, or issue structural commands (e.g. "Swap MySQL for PostgreSQL") and it will rebuild the JSON. The UI renders a precise Git-style **Changelog** showing what components or layers were added, modified, or removed.
 - **Persistence & Checkpoints** — Save architectures locally to a SQLite database. Use **Session Checkpoints** to snapshot your progress and instantly jump back to earlier states if a refinement goes wrong, and use **Overwrite** to update existing saves effortlessly.
 - **Theming** — Manual Light/Dark mode toggling built directly into the sidebar.
+- **Paste & drag-and-drop images** — every chat input in the app (the spec box, Reason Architecture, and Debug & Fix) accepts an image via Cmd+V paste or drag-and-drop, not just the file picker.
 
 > **Example input:** *"A job portal where recruiters upload JDs and resumes, an AI agent scores and ranks candidates, sends automated interview emails"*
 >
@@ -30,13 +31,20 @@ Type a plain-English product idea or upload context documents (PDFs, Word docs, 
 Once you have an architecture, hit the **Code** tab. The Coder agent turns the architecture JSON into a real full-stack scaffold and runs it through four validation tiers before showing it to you, auto-retrying up to 3 times if something fails:
 
 1. **Syntax validation** — `ast.parse` for Python, `json.loads` for JSON, `node --check` for plain JS
-2. **Backend boot-check** — installs dependencies and actually starts the generated backend (Python or Node) in an isolated temp dir
-3. **Live run** — click **Run App** to install + build the real frontend and boot the real backend together, embedded live in an iframe right inside SpecForge (backend on :8000, frontend on :8001)
+2. **Backend boot-check** — installs dependencies and actually starts every backend service the app defines (Python or Node, and both together for a split gateway + intelligence/worker service) inside a sandboxed Docker container
+3. **Live run** — click **Run App** to install + build the real frontend and boot the real backend, both sandboxed in Docker, embedded live in an iframe right inside SpecForge (backend on :8000, frontend on :8001)
 4. **Frontend smoke test** — a headless Playwright browser fills every form field, submits, and checks for console errors, uncaught exceptions, or a red-styled error state, catching bugs that pass syntax checks but crash at runtime
 
-Generated UIs use Tailwind (CDN), Google Fonts, and lucide-react icons, decomposed into real component files instead of one giant `App.jsx` — aiming for shipped-product polish, not a form demo.
+Generated UIs use Tailwind (CDN), Google Fonts, and lucide-react icons, decomposed into real component files instead of one giant `App.jsx` — aiming for shipped-product polish, not a form demo. Every project also ships seeded with realistic **ground-truth sample data** (real rows, real sample documents — not lorem ipsum), so it's already a populated, demoable product on first run instead of an empty state, and a real root-level **README.md** generated alongside the code with the actual setup/run commands.
 
-> **Known limits:** 3 retry attempts isn't a guarantee — some generations still fail and need a manual **Regenerate**. This is a local single-user tool: generated apps run as plain subprocesses on your machine, not in a sandboxed container.
+Generated code never touches your host Python/Node install: `pip install`/`python main.py`, `npm install`/`npm run build`, and every generated backend service run inside `python:3.13-slim`/`node:20-slim` containers (or a combined image, built once and cached, when a backend splits Python and Node services across an API gateway and a separate intelligence/worker layer), memory/CPU-capped, with `pip`/`npm` caches persisted in named Docker volumes so repeat runs stay fast, and labeled so orphans from a crashed or reloaded SpecForge process can always be found and removed. Only the static file server for the already-built frontend runs on the host — it just serves files, it doesn't execute generated code. **Requires Docker Desktop running** — boot-check and Run App are skipped with a clear error if it isn't.
+
+Once you have code, you can:
+- **Download ZIP** — the whole generated project as a zip file, no setup required.
+- **Push to GitHub** — enter a personal access token and `owner/repo`, then **Push to main** or **New branch**. Ships as a single clean commit (built via the Git Data API, not one commit per file) layered on top of whatever's already in the target branch, so it doesn't clobber other files there. The token only lives in memory for that browser tab — never persisted.
+- **Debug & Fix 🔧** — a chat, right below the code, that has *actual* control over the sandboxed app: every message drives a real headless browser against it first (console errors, an automated fill-and-submit sweep, a screenshot), and if the app isn't running yet, it boots it itself rather than asking you to click Run App first. Diagnoses root causes from that live evidence — not guesses — and when it proposes a fix, applies it and restarts the app so you see the result immediately in the live preview. Paste or drop a screenshot of a bug directly into the chat and it's sent straight to the model alongside the diagnostics.
+
+> **Known limits:** 3 retry attempts isn't a guarantee — some generations still fail and need a manual **Regenerate**. This is a local single-user tool: one global run at a time, not a per-user registry.
 
 ---
 
@@ -52,14 +60,18 @@ Generated UIs use Tailwind (CDN), Google Fonts, and lucide-react icons, decompos
 | Icons | Tabler Icons webfont (CDN) |
 | Diagram | Custom React SVG renderer (no external lib) |
 | Animation | CSS keyframes + React state machine |
-| Code validation | `ast` / `node --check` (syntax) · Playwright + headless Chromium (runtime smoke test) |
+| Code validation | `ast` / `node --check` (syntax) · Docker (sandboxed boot-check + live run) · Playwright + headless Chromium (runtime smoke test) |
 | Generated app UI | Tailwind CSS (CDN) · lucide-react · Google Fonts |
+| Export / publish | `zipfile` (stdlib, ZIP download) · GitHub Git Data API via `httpx` (Push to GitHub) |
 
 ---
 
 ## Quick Start
 
 ```bash
+# 0. Install & start Docker Desktop — required for the Coder agent's
+#    boot-check and Run App (generated code runs sandboxed in containers)
+
 # 1. Clone
 git clone https://github.com/BhaveshMRA/specforge.git
 cd specforge
@@ -112,22 +124,25 @@ The system prompt forces the model to think like a senior architect: concrete te
 ```
 Architecture JSON → POST /api/code
         ↓
-Gemma generates a full-stack scaffold (backend + frontend files)
+Gemma generates a full-stack scaffold (backend + frontend files + README.md)
         ↓
 Tier 1: syntax-validate every file
         ↓
-Tier 2: install deps, boot the generated backend for real
+Tier 2: install deps, boot every backend service for real (in Docker)
         ↓
 Tier 4: headless Playwright fills the UI, submits, checks for errors
         ↓
 Any failure → the specific error is fed back to Gemma → retry (max 3x)
         ↓
-Files + validation results + run instructions returned to the UI
+Files + validation results returned to the UI
         ↓
 Click "Run App" (Tier 3) → backend + built frontend run live, embedded in an iframe
+        ↓
+Debug & Fix chat → drives a real browser against the live app, diagnoses from
+that evidence, applies a fix, restarts the app automatically
 ```
 
-Backend and frontend always run on fixed ports (8000 / 8001) so the generated frontend's hardcoded API calls just work — only one live run at a time, and starting a new one stops whatever's running first.
+Backend and frontend always run on fixed ports (8000 / 8001) so the generated frontend's hardcoded API calls just work — only one live run at a time, and starting a new one stops whatever's running first. If the architecture calls for more than one backend service (e.g. an API gateway plus a separate intelligence/worker layer), each additional service lives in its own `backend/<name>/` subdirectory and gets the next port up (8001, 8002, ...) — all of them start together in the sandbox and reach each other over `localhost`, so gateway → internal-service calls actually work.
 
 ---
 

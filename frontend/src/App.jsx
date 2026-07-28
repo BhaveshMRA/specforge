@@ -575,6 +575,28 @@ function LayerRow({layer,idx,total}){
   );
 }
 
+// ── Paste/drop image attach — shared by every chat input in the app ────────
+
+function imagesFromPaste(e){
+  const items=Array.from((e.clipboardData&&e.clipboardData.items)||[]);
+  return items.filter(it=>it.kind==="file"&&it.type.startsWith("image/")).map(it=>it.getAsFile()).filter(Boolean);
+}
+function imagesFromDrop(e){
+  return Array.from((e.dataTransfer&&e.dataTransfer.files)||[]).filter(f=>f.type.startsWith("image/"));
+}
+
+async function downloadZip(files){
+  if(!files||!files.length)return;
+  const res=await fetch("/api/code/zip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({files})});
+  if(!res.ok)return;
+  const blob=await res.blob();
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download="specforge-project.zip";
+  document.body.appendChild(a);a.click();a.remove();
+  URL.revokeObjectURL(url);
+}
+
 // ── Feedback Panel ────────────────────────────────────────────────────────────
 
 function computeChangelog(oldArch, newArch){
@@ -707,7 +729,17 @@ function FeedbackPanel({arch,onRefine}){
             </div>
           )}
           <textarea value={feedback} onChange={e=>setFeedback(e.target.value)} onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")submit();}}
-            placeholder={"Ask a question or request a change...\n\nExamples:\n• Where is the database located?\n• Add a Redis cache layer"}
+            onPaste={e=>{
+              const imgs=imagesFromPaste(e);
+              if(imgs.length){ e.preventDefault(); setAttachedFiles(prev=>[...prev,...imgs.map(f=>({file:f,name:f.name||"pasted-image.png"}))]); }
+            }}
+            onDragOver={e=>e.preventDefault()}
+            onDrop={e=>{
+              e.preventDefault();
+              const imgs=imagesFromDrop(e);
+              if(imgs.length) setAttachedFiles(prev=>[...prev,...imgs.map(f=>({file:f,name:f.name}))]);
+            }}
+            placeholder={"Ask a question or request a change...\n\nExamples:\n• Where is the database located?\n• Add a Redis cache layer\n\n(Paste or drag & drop an image too)"}
             style={{width:"100%",minHeight:90,resize:"vertical",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",fontSize:13,padding:"10px 12px",lineHeight:1.55,outline:"none",boxSizing:"border-box"}}
           />
           {attachedFiles.map((af,i)=>(
@@ -956,20 +988,21 @@ function HamburgerSidebar({onLoad,theme,onToggleTheme}){
 }
 
 function CodeView({arch}){
-  const [state,setState]=useState({loading:false,files:null,instructions:"",error:null,validation:[],attempts:1,bootCheck:null,frontendCheck:null});
+  const [state,setState]=useState({loading:false,files:null,error:null,validation:[],attempts:1,bootCheck:null,frontendCheck:null});
   const [selected,setSelected]=useState(0);
   const [run,setRun]=useState({status:"idle",backendUrl:null,frontendUrl:null,error:null}); // idle | starting | running | error
+  const [reloadKey,setReloadKey]=useState(0);
 
   async function generate(){
-    setState({loading:true,files:null,instructions:"",error:null,validation:[],attempts:1,bootCheck:null,frontendCheck:null});
+    setState({loading:true,files:null,error:null,validation:[],attempts:1,bootCheck:null,frontendCheck:null});
     try{
       const res=await fetch("/api/code",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({architecture:arch})});
       const data=await res.json();
       if(!res.ok)throw new Error(data.detail||"Code generation failed");
-      setState({loading:false,files:data.files||[],instructions:data.run_instructions||"",error:null,validation:data.validation||[],attempts:data.attempts||1,bootCheck:data.boot_check||null,frontendCheck:data.frontend_check||null});
+      setState({loading:false,files:data.files||[],error:null,validation:data.validation||[],attempts:data.attempts||1,bootCheck:data.boot_check||null,frontendCheck:data.frontend_check||null});
       setSelected(0);
     }catch(e){
-      setState({loading:false,files:null,instructions:"",error:e.message||"Code generation failed.",validation:[],attempts:1,bootCheck:null,frontendCheck:null});
+      setState({loading:false,files:null,error:e.message||"Code generation failed.",validation:[],attempts:1,bootCheck:null,frontendCheck:null});
     }
   }
 
@@ -992,6 +1025,22 @@ function CodeView({arch}){
   async function stopApp(){
     setRun({status:"idle",backendUrl:null,frontendUrl:null,error:null});
     try{ await fetch("/api/code/stop",{method:"POST"}); }catch{}
+  }
+
+  function handleDebugAppState(data){
+    if(data.type==="fix"&&data.files){
+      setState(prev=>({...prev,files:data.files,validation:data.validation||prev.validation}));
+    }
+    const wasRunning=run.status==="running";
+    if(data.app_running&&data.backend_url&&data.frontend_url){
+      setRun({status:"running",backendUrl:data.backend_url,frontendUrl:data.frontend_url,error:null});
+      // remount the iframe whenever the app just came up or the files changed underneath it --
+      // same URL, so React won't reload it on its own
+      if(!wasRunning||data.type==="fix") setReloadKey(k=>k+1);
+    }else{
+      const failure=data.run_result&&data.run_result.error;
+      setRun({status:failure?"error":"idle",backendUrl:null,frontendUrl:null,error:failure||null});
+    }
   }
 
   if(state.loading){
@@ -1047,10 +1096,14 @@ function CodeView({arch}){
             </span>
           )}
         </div>
-        {run.status==="idle"&&<button className="json-btn" onClick={runApp}><i className="ti ti-player-play" aria-hidden="true"/> Run App</button>}
-        {run.status==="starting"&&<button className="json-btn" disabled><i className="ti ti-loader" style={{animation:"spin 1s linear infinite"}} aria-hidden="true"/> Starting…</button>}
-        {run.status==="running"&&<button className="json-btn" onClick={stopApp}><i className="ti ti-player-stop" aria-hidden="true"/> Stop App</button>}
-        {run.status==="error"&&<button className="json-btn" onClick={runApp}><i className="ti ti-refresh" aria-hidden="true"/> Retry Run</button>}
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {run.status==="idle"&&<button className="json-btn" onClick={runApp}><i className="ti ti-player-play" aria-hidden="true"/> Run App</button>}
+          {run.status==="starting"&&<button className="json-btn" disabled><i className="ti ti-loader" style={{animation:"spin 1s linear infinite"}} aria-hidden="true"/> Starting…</button>}
+          {run.status==="running"&&<button className="json-btn" onClick={stopApp}><i className="ti ti-player-stop" aria-hidden="true"/> Stop App</button>}
+          {run.status==="error"&&<button className="json-btn" onClick={runApp}><i className="ti ti-refresh" aria-hidden="true"/> Retry Run</button>}
+          <button className="json-btn" onClick={()=>downloadZip(state.files)}><i className="ti ti-download" aria-hidden="true"/> ZIP</button>
+          <GithubPushPanel files={state.files}/>
+        </div>
       </div>
       {run.status==="starting"&&(
         <p style={{fontSize:11.5,color:"var(--color-text-tertiary)",fontFamily:"var(--font-sans)",margin:"0 0 8px"}}>
@@ -1065,7 +1118,7 @@ function CodeView({arch}){
           <p style={{fontSize:11.5,color:"var(--color-text-tertiary)",fontFamily:"var(--font-sans)",margin:"0 0 6px"}}>
             Live preview — frontend at <code>{run.frontendUrl}</code>, backend at <code>{run.backendUrl}</code>
           </p>
-          <iframe src={run.frontendUrl} title="Live app preview"
+          <iframe key={reloadKey} src={run.frontendUrl} title="Live app preview"
             style={{width:"100%",height:"70vh",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",background:"#fff"}}/>
         </div>
       )}
@@ -1102,13 +1155,162 @@ function CodeView({arch}){
           {state.files[selected]?.content}
         </pre>
       </div>
-      {state.instructions&&(
-        <div className="flows-section" style={{marginTop:12}}>
-          <div className="flows-header">
-            <i className="ti ti-terminal-2" aria-hidden="true"/>
-            <span>Run instructions</span>
+      <CodeDebugPanel files={state.files} isRunning={run.status==="running"} onAppState={handleDebugAppState}/>
+    </div>
+  );
+}
+
+function GithubPushPanel({files}){
+  const [open,setOpen]=useState(false);
+  const [token,setToken]=useState("");
+  const [repo,setRepo]=useState("");
+  const [branchName,setBranchName]=useState("");
+  const [loading,setLoading]=useState(null); // null | "main" | "branch"
+  const [result,setResult]=useState(null);
+  const [err,setErr]=useState(null);
+  const fieldStyle={width:"100%",boxSizing:"border-box",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",fontSize:12,padding:"7px 10px",outline:"none"};
+
+  async function push(mode){
+    if(!token.trim()||!repo.trim()||loading)return;
+    setLoading(mode);setErr(null);setResult(null);
+    try{
+      const res=await fetch("/api/code/github-push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+        files,token:token.trim(),repo:repo.trim(),mode,branch_name:branchName.trim(),
+        commit_message:"Generated by SpecForge",
+      })});
+      const data=await res.json();
+      if(!res.ok)throw new Error(data.detail||"Push failed");
+      setResult(data);
+    }catch(e){setErr(e.message||"Push failed.");}
+    finally{setLoading(null);}
+  }
+
+  return(
+    <div style={{position:"relative"}}>
+      <button className="json-btn" onClick={()=>setOpen(o=>!o)}><i className="ti ti-brand-github" aria-hidden="true"/> Push to GitHub</button>
+      {open&&(
+        <div className="fade-up" style={{position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:20,width:300,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",padding:14,boxShadow:"0 8px 24px rgba(0,0,0,0.35)",display:"flex",flexDirection:"column",gap:8}}>
+          <input type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder="GitHub personal access token" style={fieldStyle}/>
+          <input type="text" value={repo} onChange={e=>setRepo(e.target.value)} placeholder="owner/repo" style={fieldStyle}/>
+          <input type="text" value={branchName} onChange={e=>setBranchName(e.target.value)} placeholder="New branch name (optional)" style={fieldStyle}/>
+          {err&&<p style={{margin:0,fontSize:11,color:"#D85A30"}}>{err}</p>}
+          {result&&(
+            <p style={{margin:0,fontSize:11,color:"#1D9E75"}}>
+              Pushed → <a href={result.branch_url} target="_blank" rel="noreferrer" style={{color:"inherit"}}>{result.branch}</a>
+            </p>
+          )}
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>push("main")} disabled={!!loading||!token.trim()||!repo.trim()} className="json-btn" style={{flex:1,justifyContent:"center",fontSize:11}}>
+              {loading==="main"?"Pushing…":"Push to main"}
+            </button>
+            <button onClick={()=>push("branch")} disabled={!!loading||!token.trim()||!repo.trim()} className="json-btn" style={{flex:1,justifyContent:"center",fontSize:11}}>
+              {loading==="branch"?"Pushing…":"New branch"}
+            </button>
           </div>
-          <pre className="json-block" style={{margin:0}}>{state.instructions}</pre>
+          <p style={{margin:0,fontSize:10,color:"var(--color-text-tertiary)"}}>Token is kept in memory for this tab only, never stored.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodeDebugPanel({files,isRunning,onAppState}){
+  const [open,setOpen]=useState(false);
+  const [feedback,setFeedback]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState(null);
+  const [chatHistory,setChatHistory]=useState([]);
+  const [images,setImages]=useState([]); // [{name, dataUrl}] -- sent straight to the vision model, no /api/upload round-trip
+
+  function addImageFiles(imgFiles){
+    imgFiles.forEach(file=>{
+      const reader=new FileReader();
+      reader.onload=()=>setImages(prev=>[...prev,{name:file.name||"pasted-image.png",dataUrl:reader.result}]);
+      reader.readAsDataURL(file);
+    });
+  }
+  function removeImage(i){setImages(prev=>prev.filter((_,idx)=>idx!==i));}
+
+  async function submit(){
+    if((!feedback.trim()&&!images.length)||loading)return;
+    setLoading(true);setErr(null);
+    const promptText=feedback.trim();
+    const historyForRequest=chatHistory;
+    const imagesForRequest=images.map(img=>img.dataUrl);
+    setChatHistory(prev=>[...prev,{role:"user",message:promptText||"Attached a screenshot."}]);
+    setFeedback("");setImages([]);
+    try{
+      const res=await fetch("/api/code/reason",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({files,feedback:promptText||"Check the attached screenshot and diagnose/fix what it shows.",chat_history:historyForRequest,images:imagesForRequest})});
+      const data=await res.json();
+      if(!res.ok)throw new Error(data.detail||"Debug request failed");
+      if(data.type==="fix"&&data.files){
+        setChatHistory(prev=>[...prev,{role:"system",message:data.message||"Applied a fix."}]);
+      }else{
+        setChatHistory(prev=>[...prev,{role:"assistant",message:data.message||"..."}]);
+      }
+      onAppState(data);
+    }catch(e){setErr(e.message||"Debug request failed.");}
+    finally{setLoading(false);}
+  }
+
+  return(
+    <div style={{marginTop:12,borderTop:"0.5px solid var(--color-border-tertiary)",paddingTop:12}}>
+      <button onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",fontSize:12,fontWeight:600,color:open?"var(--color-text-primary)":"var(--color-text-tertiary)",padding:"4px 0",transition:"color 0.2s",fontFamily:"var(--font-sans)"}}>
+        <i className={"ti "+(open?"ti-chevron-up":"ti-bug")} style={{fontSize:14}}/>
+        {open?"Close":"Debug & Fix 🔧"}
+      </button>
+
+      {open&&(
+        <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:8}} className="fade-up">
+          <p style={{margin:0,fontSize:11,color:"var(--color-text-tertiary)",fontFamily:"var(--font-sans)",display:"flex",alignItems:"center",gap:5}}>
+            {isRunning?(
+              <><i className="ti ti-circle-check" style={{color:"var(--color-accent-green,#4ade80)",fontSize:13}} aria-hidden="true"/> App is running — every message drives a real headless browser against it first (console errors, an interaction sweep, a screenshot) before answering.</>
+            ):(
+              <><i className="ti ti-info-circle" style={{fontSize:13}} aria-hidden="true"/> App isn't running yet — your first message will boot it in the sandbox so I can inspect it live before answering.</>
+            )}
+          </p>
+          {chatHistory.length>0&&(
+            <div style={{display:"flex",flexDirection:"column",gap:8,padding:"10px",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--radius-md)",maxHeight:250,overflowY:"auto"}}>
+              {chatHistory.map((msg,i)=>(
+                <div key={i} style={{fontSize:12,fontFamily:"var(--font-sans)",display:"flex",gap:6,alignItems:"flex-start",color:msg.role==="user"?"var(--color-text-primary)":msg.role==="system"?"#1D9E75":"var(--color-text-secondary)"}}>
+                  <i className={"ti "+(msg.role==="user"?"ti-user":msg.role==="system"?"ti-check":"ti-robot")} style={{marginTop:2,fontSize:14,opacity:0.8}} aria-hidden="true"/>
+                  <div style={{lineHeight:1.45,flex:1,wordBreak:"break-word"}}>{msg.message}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <textarea value={feedback} onChange={e=>setFeedback(e.target.value)} onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")submit();}}
+            onPaste={e=>{
+              const imgs=imagesFromPaste(e);
+              if(imgs.length){ e.preventDefault(); addImageFiles(imgs); }
+            }}
+            onDragOver={e=>e.preventDefault()}
+            onDrop={e=>{
+              e.preventDefault();
+              const imgs=imagesFromDrop(e);
+              if(imgs.length) addImageFiles(imgs);
+            }}
+            placeholder={"Ask a question or report a bug...\n\nExamples:\n• There's an error loading tasks\n• The delete button doesn't work\n\n(Paste or drag & drop a screenshot too)"}
+            style={{width:"100%",minHeight:80,resize:"vertical",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-md)",color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",fontSize:13,padding:"10px 12px",lineHeight:1.55,outline:"none",boxSizing:"border-box"}}
+          />
+          {images.length>0&&(
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {images.map((img,i)=>(
+                <div key={i} style={{position:"relative"}}>
+                  <img src={img.dataUrl} alt={img.name} style={{width:48,height:48,objectFit:"cover",borderRadius:"var(--radius-sm)",border:"0.5px solid var(--color-border-tertiary)",display:"block"}}/>
+                  <button onClick={()=>removeImage(i)} title="Remove image" style={{position:"absolute",top:-6,right:-6,width:16,height:16,padding:0,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"50%",fontSize:11,lineHeight:1,color:"var(--color-text-tertiary)",cursor:"pointer"}}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {err&&<p style={{margin:0,fontSize:12,color:"#D85A30"}}>{err}</p>}
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{flex:1}}/>
+            <button onClick={()=>{setOpen(false);setFeedback("");setErr(null);setChatHistory([]);setImages([]);}} style={{background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--radius-sm)",padding:"6px 14px",fontSize:12,color:"var(--color-text-secondary)",cursor:"pointer",fontFamily:"var(--font-sans)"}}>Cancel</button>
+            <button onClick={submit} disabled={loading||(!feedback.trim()&&!images.length)} className="run-btn" style={{padding:"6px 16px",fontSize:12}}>
+              {loading?(<span style={{display:"flex",alignItems:"center",gap:6}}><span className="dots">{[0,1,2].map(i=><span key={i} className={"dot dot"+i}/>)}</span>{isRunning?"Inspecting & fixing…":"Booting sandbox & inspecting…"}</span>):<><i className="ti ti-bug" aria-hidden="true"/> Debug ↗</>}
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1118,6 +1320,8 @@ function CodeView({arch}){
 function ArchDiagram({arch,onRefine,checkpoints,onCheckpoint,onLoadCheckpoint,activeSaveId,onSaveComplete}){
   const [view,setView]=useState("diagram");
   const [showJSON,setShowJSON]=useState(false);
+  const [hasVisitedCode,setHasVisitedCode]=useState(false);
+  React.useEffect(()=>{ if(view==="code") setHasVisitedCode(true); },[view]);
   const numLayers=(arch.layers||[]).length;
   const flowDelay=0.06+numLayers*0.13+0.2;
   return(
@@ -1183,8 +1387,8 @@ function ArchDiagram({arch,onRefine,checkpoints,onCheckpoint,onLoadCheckpoint,ac
         </div>
       )}
 
-      {view==="code"&&(
-        <div className="fade-up">
+      {hasVisitedCode&&(
+        <div className="fade-up" style={{display:view==="code"?"block":"none"}}>
           <CodeView arch={arch}/>
         </div>
       )}
@@ -1303,7 +1507,17 @@ export default function SpecForge(){
       <div className="input-panel">
         <textarea value={spec} onChange={e=>setSpec(e.target.value)}
           onKeyDown={e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")run();}}
-          placeholder={"Describe your product idea...\n\nExamples:\n• Build me an ATS app using the inputs of this PDF\n• AI-powered chatbot for customer support\n• Research agent that reads arXiv papers"}
+          onPaste={e=>{
+            const imgs=imagesFromPaste(e);
+            if(imgs.length){ e.preventDefault(); setAttachedFiles(prev=>[...prev,...imgs.map(f=>({file:f,name:f.name||"pasted-image.png",charCount:null,extractedText:null}))]); }
+          }}
+          onDragOver={e=>e.preventDefault()}
+          onDrop={e=>{
+            e.preventDefault();
+            const imgs=imagesFromDrop(e);
+            if(imgs.length) setAttachedFiles(prev=>[...prev,...imgs.map(f=>({file:f,name:f.name,charCount:null,extractedText:null}))]);
+          }}
+          placeholder={"Describe your product idea...\n\nExamples:\n• Build me an ATS app using the inputs of this PDF\n• AI-powered chatbot for customer support\n• Research agent that reads arXiv papers\n\n(Paste or drag & drop an image too)"}
         />
 
         {/* File badge */}
